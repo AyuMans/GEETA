@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import sys
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
@@ -7,7 +8,16 @@ import tempfile
 import zipfile
 from dotenv import load_dotenv
 import shutil
-
+# Add service-specific configuration
+if 'win32service' in sys.modules or os.name == 'nt':
+    # Running as Windows service - configure for headless operation
+    import streamlit.web.bootstrap
+    
+    # Ensure proper temp directory for service
+    service_temp_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp", "document_qa")
+    os.makedirs(service_temp_dir, exist_ok=True)
+    os.environ['TEMP'] = service_temp_dir
+    
 load_dotenv()
 
 class GeminiDocumentQA:
