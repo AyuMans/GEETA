@@ -1,3 +1,5 @@
+(viewing in "Code" tab is recommended)
+
 # Generative Enhanced Examination & Text Analysis (GEETA):
 
 An AI-powered document question-answering system that uses Google Gemini AI to read and analyze your documents. Upload any PDF, DOCX, or TXT file and get intelligent answers to your questions instantly.
