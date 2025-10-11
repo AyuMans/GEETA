@@ -1,3 +1,4 @@
+#Start a service to keep the website running!
 import win32serviceutil
 import win32service
 import win32event
