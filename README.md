@@ -332,7 +332,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - 🐛 **Bug Reports**: [Open an issue](https://github.com/AyuMans/geeta/issues)
 - 💡 **Feature Requests**: [Start a discussion](https://github.com/AyuMans/geeta/discussions)
-- 📧 **Contact**: ayumansvit@gmail.com
+- 📧 **Contact**: [ayumansvit@gmail.com](https://mail.google.com/mail/u/0/?tab=rm&ogbl#inbox?compose=CllgCKCDBvxdwcXPscgMkGRNRBQWlVMMXVGlbmkgjdkcKBtFkkKbFSmlvWQHcQHvpPthrHpBFHL)
 
 ---
 
