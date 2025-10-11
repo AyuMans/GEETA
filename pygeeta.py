@@ -1,3 +1,4 @@
+#Python version
 import os
 import google.generativeai as genai
 from PyPDF2 import PdfReader
@@ -397,3 +398,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
