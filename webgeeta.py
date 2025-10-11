@@ -1,4 +1,5 @@
 #Web version of GEETA
+#Web version of GEETA
 import streamlit as st
 import os
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import zipfile
 from dotenv import load_dotenv
 import shutil
+
 # Add service-specific configuration
 if 'win32service' in sys.modules or os.name == 'nt':
     # Running as Windows service - configure for headless operation
@@ -76,8 +78,8 @@ class GeminiDocumentQA:
         except Exception as e:
             return False, f"Error processing file: {str(e)}"
     
-    def load_folder(self, folder_path):
-        """Load all supported documents from a folder"""
+    def load_folder_contents(self, folder_path):
+        """Load all supported documents from a folder - FIXED VERSION"""
         if not os.path.exists(folder_path):
             return False, "Folder not found"
         
@@ -87,9 +89,10 @@ class GeminiDocumentQA:
         supported_extensions = ['.pdf', '.docx', '.txt', '.md']
         file_paths = []
         
-        for filename in os.listdir(folder_path):
-            file_path = os.path.join(folder_path, filename)
-            if os.path.isfile(file_path):
+        # Recursively search for files in the folder
+        for root, dirs, files in os.walk(folder_path):
+            for filename in files:
+                file_path = os.path.join(root, filename)
                 file_ext = os.path.splitext(filename)[1].lower()
                 if file_ext in supported_extensions:
                     file_paths.append(file_path)
@@ -98,10 +101,15 @@ class GeminiDocumentQA:
             return False, f"No supported documents found. Supported formats: {', '.join(supported_extensions)}"
         
         successful_loads = 0
+        failed_loads = 0
+        
         for file_path in file_paths:
-            success, _ = self.load_document(file_path)
+            success, message = self.load_document(file_path)
             if success:
                 successful_loads += 1
+            else:
+                failed_loads += 1
+                st.warning(f"Failed to load {os.path.basename(file_path)}: {message}")
         
         self.folder_path = folder_path
         return True, f"Successfully loaded {successful_loads}/{len(file_paths)} documents from folder"
@@ -112,14 +120,16 @@ class GeminiDocumentQA:
             return []
         
         all_files = []
-        for filename in os.listdir(self.folder_path):
-            file_path = os.path.join(self.folder_path, filename)
-            if os.path.isfile(file_path):
+        supported_extensions = ['.pdf', '.docx', '.txt', '.md']
+        
+        for root, dirs, files in os.walk(self.folder_path):
+            for filename in files:
+                file_path = os.path.join(root, filename)
                 file_info = {
                     'name': filename,
                     'path': file_path,
                     'loaded': file_path in self.loaded_files,
-                    'supported': os.path.splitext(filename)[1].lower() in ['.pdf', '.docx', '.txt', '.md']
+                    'supported': os.path.splitext(filename)[1].lower() in supported_extensions
                 }
                 all_files.append(file_info)
         
@@ -255,8 +265,8 @@ class GeminiDocumentQA:
         
         return chunks
 
-def extract_zip_folder(uploaded_zip):
-    """Extract uploaded zip file to temporary directory"""
+def extract_and_process_zip(uploaded_zip):
+    """Extract uploaded zip file and process all supported documents - FIXED VERSION"""
     try:
         # Create temporary directory
         temp_dir = tempfile.mkdtemp()
@@ -275,6 +285,7 @@ def extract_zip_folder(uploaded_zip):
         
         return temp_dir
     except Exception as e:
+        st.error(f"Error extracting ZIP file: {str(e)}")
         return None
 
 def main():
@@ -319,10 +330,16 @@ def main():
         background-color: #f8d7da;
         color: #721c24;
     }
+    .zip-info {
+        background-color: #e7f3ff;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">📚 G.E.E.T.A</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📚 G.E.E.T.A - Document QA System</h1>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'qa_system' not in st.session_state:
@@ -347,44 +364,70 @@ def main():
         
         if st.button("Upload Selected Files", type="primary", key="upload_files"):
             if uploaded_files:
+                success_count = 0
                 for uploaded_file in uploaded_files:
                     success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
                     if success:
                         st.success(f"✅ {message}")
+                        success_count += 1
                     else:
                         st.error(f"❌ {message}")
+                if success_count > 0:
+                    st.success(f"🎉 Successfully loaded {success_count} files!")
             else:
                 st.warning("Please select files to upload.")
         
         # Folder upload section
         st.markdown("---")
-        st.subheader("📁 Upload Folder")
+        st.subheader("📁 Upload ZIP Folder")
         
         st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
-        st.write("**Upload a ZIP folder containing documents**")
+        st.write("**Upload a ZIP file containing documents**")
+        st.markdown("""
+<div style="
+    background-color: #91b7bd; 
+    padding: 15px; 
+    border-radius: 8px; 
+    border-left: 4px solid #1f77b4;
+    margin: 10px 0;
+    color: #1a365d;
+    font-size: 16px;
+">
+<strong style="color: #1a365d;">📦 ZIP File Requirements:</strong><br>
+• Can contain PDF, DOCX, TXT, MD files<br>
+• Supports nested folders<br>
+• Files are automatically extracted and processed
+</div>
+""", unsafe_allow_html=True)
+        
         uploaded_zip = st.file_uploader(
             "Choose a ZIP file",
             type=['zip'],
             key="folder_upload",
-            help="Upload a ZIP file containing your documents"
+            help="Upload a ZIP file containing your documents (PDF, DOCX, TXT, MD)"
         )
         st.markdown('</div>', unsafe_allow_html=True)
         
-        if st.button("📂 Extract and Load Folder", type="primary", key="load_folder"):
+        if st.button("📂 Extract and Load ZIP Contents", type="primary", key="load_zip"):
             if uploaded_zip:
-                with st.spinner("Extracting folder..."):
-                    temp_dir = extract_zip_folder(uploaded_zip)
+                with st.spinner("Extracting ZIP file and processing documents..."):
+                    # Extract ZIP to temporary directory
+                    temp_dir = extract_and_process_zip(uploaded_zip)
                     
                     if temp_dir:
+                        # Store temp directory for cleanup
                         st.session_state.temp_folders.append(temp_dir)
-                        success, message = st.session_state.qa_system.load_folder(temp_dir)
+                        
+                        # Load all supported documents from the extracted folder
+                        success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
                         
                         if success:
                             st.success(f"✅ {message}")
+                            st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
                         else:
                             st.error(f"❌ {message}")
                     else:
-                        st.error("❌ Failed to extract ZIP file")
+                        st.error("❌ Failed to extract ZIP file. Please check if it's a valid ZIP archive.")
             else:
                 st.warning("Please upload a ZIP file first.")
         
@@ -394,12 +437,16 @@ def main():
             # Clean up temporary folders
             for temp_dir in st.session_state.temp_folders:
                 if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except:
+                        pass
             
             st.session_state.temp_folders = []
             st.session_state.qa_system.clear_documents()
             st.session_state.chat_history = []
             st.success("All documents cleared!")
+            st.rerun()
         
         # Document info
         st.markdown("---")
@@ -414,10 +461,19 @@ def main():
             
             # Folder files info
             if st.session_state.qa_system.folder_path:
-                with st.expander("📂 Folder Contents"):
+                with st.expander("📂 ZIP Contents Overview"):
                     folder_files = st.session_state.qa_system.get_folder_files_info()
                     if folder_files:
-                        st.write("**All files in folder:**")
+                        loaded_count = sum(1 for f in folder_files if f['loaded'])
+                        supported_count = sum(1 for f in folder_files if f['supported'])
+                        total_count = len(folder_files)
+                        
+                        st.write(f"**ZIP Statistics:**")
+                        st.write(f"• Total files: {total_count}")
+                        st.write(f"• Supported formats: {supported_count}")
+                        st.write(f"• Successfully loaded: {loaded_count}")
+                        
+                        st.write("**All files in ZIP:**")
                         for file_info in folder_files:
                             if file_info['loaded']:
                                 status_class = "status-loaded"
@@ -434,7 +490,7 @@ def main():
                                 unsafe_allow_html=True
                             )
         else:
-            st.info("No documents loaded")
+            st.info("No documents loaded. Upload files or a ZIP folder to get started.")
         
         # API Info
         st.markdown("---")
@@ -502,7 +558,7 @@ def main():
     
     with col4:
         folders_count = len(st.session_state.temp_folders)
-        st.metric("Uploaded Folders", folders_count)
+        st.metric("Uploaded ZIPs", folders_count)
 
 # Cleanup function
 def cleanup_temp_folders():
@@ -521,4 +577,3 @@ atexit.register(cleanup_temp_folders)
 
 if __name__ == "__main__":
     main()
-
