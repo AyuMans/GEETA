@@ -335,14 +335,26 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS
+    # Custom CSS with glowy effects
     st.markdown("""
     <style>
     .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
+        font-size: 3rem;
+        background: linear-gradient(90deg, #1f77b4, #ff7f0e, #2ca02c, #d62728);
+        background-size: 400% 400%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
         text-align: center;
         margin-bottom: 2rem;
+        font-weight: 800;
+        animation: gradientShift 8s ease infinite;
+        text-shadow: 0 0 20px rgba(31, 119, 180, 0.3);
+    }
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
     }
     .folder-upload {
         background-color: #f0f8ff;
@@ -402,6 +414,27 @@ def main():
     .remove-btn {
         margin-left: 10px;
     }
+    
+    /* Glowing effect for headers */
+    .glow-header {
+        font-size: 1.8rem;
+        color: #1f77b4;
+        text-shadow: 0 0 10px rgba(31, 119, 180, 0.7);
+        margin-bottom: 1rem;
+        border-bottom: 2px solid rgba(31, 119, 180, 0.3);
+        padding-bottom: 0.5rem;
+    }
+    
+    /* Glowing buttons */
+    .stButton > button {
+        border-radius: 8px;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        box-shadow: 0 0 15px rgba(31, 119, 180, 0.4);
+    }
+    
     /* Override Streamlit's default white background for divs */
     div[data-testid="stMarkdownContainer"] div {
         background-color: transparent !important;
@@ -421,148 +454,191 @@ def main():
     if 'file_states' not in st.session_state:
         st.session_state.file_states = {}
     
-    # Sidebar
+    # Sidebar with tabs
     with st.sidebar:
         st.header("📁 Document Management")
         
-        # File upload section
-        st.subheader("📄 Upload Individual Files")
-        uploaded_files = st.file_uploader(
-            "Choose files",
-            type=['pdf', 'docx', 'txt', 'md'],
-            accept_multiple_files=True,
-            help="Supported formats: PDF, DOCX, TXT, MD"
-        )
+        # Create tabs
+        tab1, tab2, tab3 = st.tabs(["📄 Individual Files", "📁 ZIP Folder", "⚡ Active Files"])
         
-        if st.button("Upload Selected Files", type="primary", key="upload_files"):
-            if uploaded_files:
-                success_count = 0
-                for uploaded_file in uploaded_files:
-                    success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
-                    if success:
-                        st.success(f"✅ {message}")
-                        success_count += 1
-                    else:
-                        st.error(f"❌ {message}")
-                if success_count > 0:
-                    st.success(f"🎉 Successfully loaded {success_count} files!")
-                    st.rerun()
-            else:
-                st.warning("Please select files to upload.")
-        
-        # Folder upload section
-        st.markdown("---")
-        st.subheader("📁 Upload ZIP Folder")
-        
-        st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
-        st.write("**Upload a ZIP file containing documents**")
-        st.markdown("""
-        <div class="zip-info">
-        <strong>📦 ZIP File Requirements:</strong><br>
-        • Can contain PDF, DOCX, TXT, MD files<br>
-        • Supports nested folders<br>
-        • Files are automatically extracted and processed
-        </div>
-        """, unsafe_allow_html=True)
-        
-        uploaded_zip = st.file_uploader(
-            "Choose a ZIP file",
-            type=['zip'],
-            key="folder_upload",
-            help="Upload a ZIP file containing your documents (PDF, DOCX, TXT, MD)"
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        if st.button("📂 Extract and Load ZIP Contents", type="primary", key="load_zip"):
-            if uploaded_zip:
-                with st.spinner("Extracting ZIP file and processing documents..."):
-                    # Extract ZIP to temporary directory
-                    temp_dir = extract_and_process_zip(uploaded_zip)
-                    
-                    if temp_dir:
-                        # Store temp directory for cleanup
-                        st.session_state.temp_folders.append(temp_dir)
-                        
-                        # Load all supported documents from the extracted folder
-                        success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
-                        
+        # Tab 1: Individual Files
+        with tab1:
+            st.subheader("Upload Individual Files")
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                type=['pdf', 'docx', 'txt', 'md'],
+                accept_multiple_files=True,
+                help="Supported formats: PDF, DOCX, TXT, MD",
+                key="individual_files"
+            )
+            
+            if st.button("Upload Selected Files", type="primary", key="upload_files"):
+                if uploaded_files:
+                    success_count = 0
+                    for uploaded_file in uploaded_files:
+                        success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
                         if success:
                             st.success(f"✅ {message}")
-                            st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
-                            st.rerun()
+                            success_count += 1
                         else:
                             st.error(f"❌ {message}")
-                    else:
-                        st.error("❌ Failed to extract ZIP file. Please check if it's a valid ZIP archive.")
-            else:
-                st.warning("Please upload a ZIP file first.")
+                    if success_count > 0:
+                        st.success(f"🎉 Successfully loaded {success_count} files!")
+                        st.rerun()
+                else:
+                    st.warning("Please select files to upload.")
+            
+            # Quick actions for individual files tab
+            if st.session_state.qa_system.loaded_files:
+                st.markdown("---")
+                st.subheader("Quick Actions")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab1"):
+                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
+                
+                with col2:
+                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab1"):
+                        st.session_state.qa_system.enabled_files = []
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
         
-        # File Selection Section - CLICK TO SELECT VERSION
-        if st.session_state.qa_system.loaded_files:
-            st.markdown("---")
-            st.subheader("⚡ Active Files")
-            st.info("Click on file names to enable/disable them for Q&A")
+        # Tab 2: ZIP Folder
+        with tab2:
+            st.subheader("Upload ZIP Folder")
             
-            # Quick actions
-            st.write("**Quick Actions:**")
-            col1, col2 = st.columns(2)
+            st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
+            st.write("**Upload a ZIP file containing documents**")
+            st.markdown("""
+            <div class="zip-info">
+            <strong>📦 ZIP File Requirements:</strong><br>
+            • Can contain PDF, DOCX, TXT, MD files<br>
+            • Supports nested folders<br>
+            • Files are automatically extracted and processed
+            </div>
+            """, unsafe_allow_html=True)
             
-            with col1:
-                if st.button("✅ Enable All", use_container_width=True, key="enable_all"):
-                    st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
-                    st.session_state.qa_system._rebuild_document_text()
-                    st.rerun()
+            uploaded_zip = st.file_uploader(
+                "Choose a ZIP file",
+                type=['zip'],
+                key="folder_upload",
+                help="Upload a ZIP file containing your documents (PDF, DOCX, TXT, MD)"
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
             
-            with col2:
-                if st.button("❌ Disable All", use_container_width=True, key="disable_all"):
-                    st.session_state.qa_system.enabled_files = []
-                    st.session_state.qa_system._rebuild_document_text()
-                    st.rerun()
-            
-            # Display files as clickable items
-            with st.container():
-                st.markdown('<div class="file-list">', unsafe_allow_html=True)
-                
-                files_to_remove = []
-                
-                for file_path in st.session_state.qa_system.loaded_files:
-                    col1, col2 = st.columns([6, 1])
-                    
-                    # Get current enabled state
-                    current_enabled = file_path in st.session_state.qa_system.enabled_files
-                    
-                    with col1:
-                        # Create a unique key for each file button
-                        file_button_key = f"file_toggle_{file_path}"
+            if st.button("📂 Extract and Load ZIP Contents", type="primary", key="load_zip"):
+                if uploaded_zip:
+                    with st.spinner("Extracting ZIP file and processing documents..."):
+                        # Extract ZIP to temporary directory
+                        temp_dir = extract_and_process_zip(uploaded_zip)
                         
-                        # Determine button label and style based on enabled state
-                        if current_enabled:
-                            button_label = f"✅ {os.path.basename(file_path)}"
-                            button_type = "primary"
+                        if temp_dir:
+                            # Store temp directory for cleanup
+                            st.session_state.temp_folders.append(temp_dir)
+                            
+                            # Load all supported documents from the extracted folder
+                            success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                                st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {message}")
                         else:
-                            button_label = f"❌ {os.path.basename(file_path)}"
-                            button_type = "secondary"
-                        
-                        # Clickable file button to toggle selection
-                        if st.button(button_label, key=file_button_key, use_container_width=True, type=button_type):
-                            st.session_state.qa_system.toggle_file(file_path, not current_enabled)
-                            st.rerun()
+                            st.error("❌ Failed to extract ZIP file. Please check if it's a valid ZIP archive.")
+                else:
+                    st.warning("Please upload a ZIP file first.")
+            
+            # Quick actions for ZIP folder tab
+            if st.session_state.qa_system.loaded_files:
+                st.markdown("---")
+                st.subheader("Quick Actions")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab2"):
+                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
+                
+                with col2:
+                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab2"):
+                        st.session_state.qa_system.enabled_files = []
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
+        
+        # Tab 3: Active Files Management
+        with tab3:
+            if st.session_state.qa_system.loaded_files:
+                st.subheader("File Management")
+                st.info("Click on file names to enable/disable them for Q&A")
+                
+                # Quick actions
+                st.write("**Quick Actions:**")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab3"):
+                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
+                
+                with col2:
+                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab3"):
+                        st.session_state.qa_system.enabled_files = []
+                        st.session_state.qa_system._rebuild_document_text()
+                        st.rerun()
+                
+                # Display files as clickable items
+                with st.container():
+                    st.markdown('<div class="file-list">', unsafe_allow_html=True)
                     
-                    with col2:
-                        if st.button("🗑️", key=f"remove_{file_path}", help="Remove file"):
-                            files_to_remove.append(file_path)
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Remove files after iteration
-                for file_path in files_to_remove:
-                    st.session_state.qa_system.remove_file(file_path)
-                    st.success(f"Removed: {os.path.basename(file_path)}")
-                    st.rerun()
-                
-        # Clear documents
+                    files_to_remove = []
+                    
+                    for file_path in st.session_state.qa_system.loaded_files:
+                        col1, col2 = st.columns([6, 1])
+                        
+                        # Get current enabled state
+                        current_enabled = file_path in st.session_state.qa_system.enabled_files
+                        
+                        with col1:
+                            # Create a unique key for each file button
+                            file_button_key = f"file_toggle_{file_path}"
+                            
+                            # Determine button label and style based on enabled state
+                            if current_enabled:
+                                button_label = f"✅ {os.path.basename(file_path)}"
+                                button_type = "primary"
+                            else:
+                                button_label = f"❌ {os.path.basename(file_path)}"
+                                button_type = "secondary"
+                            
+                            # Clickable file button to toggle selection
+                            if st.button(button_label, key=file_button_key, use_container_width=True, type=button_type):
+                                st.session_state.qa_system.toggle_file(file_path, not current_enabled)
+                                st.rerun()
+                        
+                        with col2:
+                            if st.button("🗑️", key=f"remove_{file_path}", help="Remove file"):
+                                files_to_remove.append(file_path)
+                    
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Remove files after iteration
+                    for file_path in files_to_remove:
+                        st.session_state.qa_system.remove_file(file_path)
+                        st.success(f"Removed: {os.path.basename(file_path)}")
+                        st.rerun()
+            else:
+                st.info("No documents loaded. Upload files or a ZIP folder to get started.")
+        
+        # Clear documents (outside tabs)
         st.markdown("---")
-        if st.button("🗑️ Clear All Documents", type="secondary"):
+        if st.button("🗑️ Clear All Documents", type="secondary", use_container_width=True):
             # Clean up temporary folders
             for temp_dir in st.session_state.temp_folders:
                 if os.path.exists(temp_dir):
@@ -618,7 +694,7 @@ def main():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("💬 Ask Questions")
+        st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
         
         # Show active files info
         if st.session_state.qa_system.enabled_files:
@@ -656,7 +732,7 @@ def main():
                 st.warning("Please enter a question.")
     
     with col2:
-        st.header("📝 Chat History")
+        st.markdown('<h2 class="glow-header">📝 Chat History</h2>', unsafe_allow_html=True)
         
         if st.session_state.chat_history:
             for i, chat in enumerate(reversed(st.session_state.chat_history)):
