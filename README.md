@@ -77,6 +77,7 @@ Then open your browser to `http://localhost:8501`
 #### Web Interface Features:
 - 📤 **Upload Files**: Drag and drop PDF, DOCX, TXT, or MD files
 - 📂 **Upload Folders**: ZIP your document folder and upload all at once
+- ✅️ **Select/Deselect Files**: Click to select the files for your Q&A
 - 💬 **Ask Questions**: Get instant AI-powered answers
 - 📜 **Chat History**: View previous questions and answers
 - 📊 **Document Stats**: Track loaded documents and text size
