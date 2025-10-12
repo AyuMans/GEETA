@@ -1,5 +1,4 @@
 #Web version of GEETA
-#Web version of GEETA
 import streamlit as st
 import os
 import sys
@@ -32,7 +31,9 @@ class GeminiDocumentQA:
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('models/gemini-2.0-flash')
         self.document_text = ""
-        self.loaded_files = []
+        self.loaded_files = []  # All loaded files
+        self.enabled_files = []  # Files currently enabled for Q&A
+        self.file_contents = {}  # Store file contents separately
         self.folder_path = None
     
     def load_document(self, file_path):
@@ -49,16 +50,38 @@ class GeminiDocumentQA:
             else:
                 raise ValueError(f"Unsupported file format: {file_extension}")
             
-            if self.document_text:
-                self.document_text += f"\n\n--- Document: {os.path.basename(file_path)} ---\n\n{text}"
-            else:
-                self.document_text = f"--- Document: {os.path.basename(file_path)} ---\n\n{text}"
-            
+            # Store file content separately
+            self.file_contents[file_path] = text
             self.loaded_files.append(file_path)
+            self.enabled_files.append(file_path)  # Enable by default
+            
+            # REBUILD DOCUMENT TEXT IMMEDIATELY AFTER ADDING FILE
+            self._rebuild_document_text()
+            
             return True, f"Document '{os.path.basename(file_path)}' loaded successfully!"
             
         except Exception as e:
             return False, f"Error loading document: {str(e)}"
+    
+    def toggle_file(self, file_path, enabled):
+        """Enable or disable a file for Q&A"""
+        if enabled and file_path not in self.enabled_files:
+            self.enabled_files.append(file_path)
+        elif not enabled and file_path in self.enabled_files:
+            self.enabled_files.remove(file_path)
+        
+        # Rebuild document text from enabled files
+        self._rebuild_document_text()
+    
+    def _rebuild_document_text(self):
+        """Rebuild the combined document text from enabled files"""
+        self.document_text = ""
+        for file_path in self.enabled_files:
+            if file_path in self.file_contents:
+                if self.document_text:
+                    self.document_text += f"\n\n--- Document: {os.path.basename(file_path)} ---\n\n{self.file_contents[file_path]}"
+                else:
+                    self.document_text = f"--- Document: {os.path.basename(file_path)} ---\n\n{self.file_contents[file_path]}"
     
     def load_uploaded_file(self, uploaded_file):
         """Load document from Streamlit uploaded file object"""
@@ -109,9 +132,12 @@ class GeminiDocumentQA:
                 successful_loads += 1
             else:
                 failed_loads += 1
-                st.warning(f"Failed to load {os.path.basename(file_path)}: {message}")
         
         self.folder_path = folder_path
+        
+        # REBUILD DOCUMENT TEXT AFTER LOADING ALL FILES
+        self._rebuild_document_text()
+        
         return True, f"Successfully loaded {successful_loads}/{len(file_paths)} documents from folder"
     
     def get_folder_files_info(self):
@@ -129,6 +155,7 @@ class GeminiDocumentQA:
                     'name': filename,
                     'path': file_path,
                     'loaded': file_path in self.loaded_files,
+                    'enabled': file_path in self.enabled_files,
                     'supported': os.path.splitext(filename)[1].lower() in supported_extensions
                 }
                 all_files.append(file_info)
@@ -157,10 +184,22 @@ class GeminiDocumentQA:
         """Clear all loaded documents"""
         self.document_text = ""
         self.loaded_files = []
+        self.enabled_files = []
+        self.file_contents = {}
         self.folder_path = None
     
+    def remove_file(self, file_path):
+        """Completely remove a file from the system"""
+        if file_path in self.loaded_files:
+            self.loaded_files.remove(file_path)
+        if file_path in self.enabled_files:
+            self.enabled_files.remove(file_path)
+        if file_path in self.file_contents:
+            del self.file_contents[file_path]
+        self._rebuild_document_text()
+    
     def generate_answer(self, question):
-        """Generate answer using all loaded documents"""
+        """Generate answer using all enabled documents"""
         if not self.document_text:
             return "No documents loaded. Please upload documents first."
         
@@ -331,15 +370,46 @@ def main():
         color: #721c24;
     }
     .zip-info {
-        background-color: #e7f3ff;
-        padding: 10px;
-        border-radius: 5px;
+        background-color: #e7f3ff !important;
+        padding: 15px !important;
+        border-radius: 8px !important;
+        border-left: 4px solid #1f77b4 !important;
+        margin: 10px 0 !important;
+        color: #6b95cf !important;
+        font-size: 16px !important;
+    }
+    .file-list {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
         margin: 10px 0;
+    }
+    .file-item {
+        display: flex;
+        align-items: center;
+        padding: 8px 0;
+        border-bottom: 1px solid #e9ecef;
+    }
+    .file-item:last-child {
+        border-bottom: none;
+    }
+    .file-checkbox {
+        margin-right: 10px;
+    }
+    .file-name {
+        flex-grow: 1;
+    }
+    .remove-btn {
+        margin-left: 10px;
+    }
+    /* Override Streamlit's default white background for divs */
+    div[data-testid="stMarkdownContainer"] div {
+        background-color: transparent !important;
     }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">📚 G.E.E.T.A - Document QA System</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📚 G.E.E.T.A</h1>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'qa_system' not in st.session_state:
@@ -348,6 +418,8 @@ def main():
         st.session_state.chat_history = []
     if 'temp_folders' not in st.session_state:
         st.session_state.temp_folders = []
+    if 'file_states' not in st.session_state:
+        st.session_state.file_states = {}
     
     # Sidebar
     with st.sidebar:
@@ -374,6 +446,7 @@ def main():
                         st.error(f"❌ {message}")
                 if success_count > 0:
                     st.success(f"🎉 Successfully loaded {success_count} files!")
+                    st.rerun()
             else:
                 st.warning("Please select files to upload.")
         
@@ -384,21 +457,13 @@ def main():
         st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
         st.write("**Upload a ZIP file containing documents**")
         st.markdown("""
-<div style="
-    background-color: #91b7bd; 
-    padding: 15px; 
-    border-radius: 8px; 
-    border-left: 4px solid #1f77b4;
-    margin: 10px 0;
-    color: #1a365d;
-    font-size: 16px;
-">
-<strong style="color: #1a365d;">📦 ZIP File Requirements:</strong><br>
-• Can contain PDF, DOCX, TXT, MD files<br>
-• Supports nested folders<br>
-• Files are automatically extracted and processed
-</div>
-""", unsafe_allow_html=True)
+        <div class="zip-info">
+        <strong>📦 ZIP File Requirements:</strong><br>
+        • Can contain PDF, DOCX, TXT, MD files<br>
+        • Supports nested folders<br>
+        • Files are automatically extracted and processed
+        </div>
+        """, unsafe_allow_html=True)
         
         uploaded_zip = st.file_uploader(
             "Choose a ZIP file",
@@ -424,6 +489,7 @@ def main():
                         if success:
                             st.success(f"✅ {message}")
                             st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
+                            st.rerun()
                         else:
                             st.error(f"❌ {message}")
                     else:
@@ -431,6 +497,69 @@ def main():
             else:
                 st.warning("Please upload a ZIP file first.")
         
+        # File Selection Section - CLICK TO SELECT VERSION
+        if st.session_state.qa_system.loaded_files:
+            st.markdown("---")
+            st.subheader("⚡ Active Files")
+            st.info("Click on file names to enable/disable them for Q&A")
+            
+            # Quick actions
+            st.write("**Quick Actions:**")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("✅ Enable All", use_container_width=True, key="enable_all"):
+                    st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                    st.session_state.qa_system._rebuild_document_text()
+                    st.rerun()
+            
+            with col2:
+                if st.button("❌ Disable All", use_container_width=True, key="disable_all"):
+                    st.session_state.qa_system.enabled_files = []
+                    st.session_state.qa_system._rebuild_document_text()
+                    st.rerun()
+            
+            # Display files as clickable items
+            with st.container():
+                st.markdown('<div class="file-list">', unsafe_allow_html=True)
+                
+                files_to_remove = []
+                
+                for file_path in st.session_state.qa_system.loaded_files:
+                    col1, col2 = st.columns([6, 1])
+                    
+                    # Get current enabled state
+                    current_enabled = file_path in st.session_state.qa_system.enabled_files
+                    
+                    with col1:
+                        # Create a unique key for each file button
+                        file_button_key = f"file_toggle_{file_path}"
+                        
+                        # Determine button label and style based on enabled state
+                        if current_enabled:
+                            button_label = f"✅ {os.path.basename(file_path)}"
+                            button_type = "primary"
+                        else:
+                            button_label = f"❌ {os.path.basename(file_path)}"
+                            button_type = "secondary"
+                        
+                        # Clickable file button to toggle selection
+                        if st.button(button_label, key=file_button_key, use_container_width=True, type=button_type):
+                            st.session_state.qa_system.toggle_file(file_path, not current_enabled)
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("🗑️", key=f"remove_{file_path}", help="Remove file"):
+                            files_to_remove.append(file_path)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Remove files after iteration
+                for file_path in files_to_remove:
+                    st.session_state.qa_system.remove_file(file_path)
+                    st.success(f"Removed: {os.path.basename(file_path)}")
+                    st.rerun()
+                
         # Clear documents
         st.markdown("---")
         if st.button("🗑️ Clear All Documents", type="secondary"):
@@ -442,6 +571,8 @@ def main():
                     except:
                         pass
             
+            # Clear file states
+            st.session_state.file_states = {}
             st.session_state.temp_folders = []
             st.session_state.qa_system.clear_documents()
             st.session_state.chat_history = []
@@ -452,19 +583,17 @@ def main():
         st.markdown("---")
         st.subheader("📊 Document Info")
         if st.session_state.qa_system.loaded_files:
-            st.write(f"**Loaded files:** {len(st.session_state.qa_system.loaded_files)}")
+            enabled_count = len(st.session_state.qa_system.enabled_files)
+            total_count = len(st.session_state.qa_system.loaded_files)
+            st.write(f"**Active files:** {enabled_count}/{total_count}")
             st.write(f"**Text length:** {len(st.session_state.qa_system.document_text):,} characters")
             
-            with st.expander("View Loaded Files"):
-                for i, file_path in enumerate(st.session_state.qa_system.loaded_files, 1):
-                    st.write(f"{i}. {os.path.basename(file_path)}")
-            
-            # Folder files info
-            if st.session_state.qa_system.folder_path:
-                with st.expander("📂 ZIP Contents Overview"):
+            with st.expander("📂 ZIP Contents Overview"):
+                if st.session_state.qa_system.folder_path:
                     folder_files = st.session_state.qa_system.get_folder_files_info()
                     if folder_files:
                         loaded_count = sum(1 for f in folder_files if f['loaded'])
+                        enabled_count = sum(1 for f in folder_files if f.get('enabled', False))
                         supported_count = sum(1 for f in folder_files if f['supported'])
                         total_count = len(folder_files)
                         
@@ -472,23 +601,7 @@ def main():
                         st.write(f"• Total files: {total_count}")
                         st.write(f"• Supported formats: {supported_count}")
                         st.write(f"• Successfully loaded: {loaded_count}")
-                        
-                        st.write("**All files in ZIP:**")
-                        for file_info in folder_files:
-                            if file_info['loaded']:
-                                status_class = "status-loaded"
-                                status_text = "✓ Loaded"
-                            elif not file_info['supported']:
-                                status_class = "status-unsupported"
-                                status_text = "⚠ Unsupported"
-                            else:
-                                status_class = "status-not-loaded"
-                                status_text = "✗ Not loaded"
-                            
-                            st.markdown(
-                                f"<span class='file-status {status_class}'>{status_text}</span> {file_info['name']}",
-                                unsafe_allow_html=True
-                            )
+                        st.write(f"• Currently enabled: {enabled_count}")
         else:
             st.info("No documents loaded. Upload files or a ZIP folder to get started.")
         
@@ -507,6 +620,13 @@ def main():
     with col1:
         st.header("💬 Ask Questions")
         
+        # Show active files info
+        if st.session_state.qa_system.enabled_files:
+            enabled_files_list = [os.path.basename(f) for f in st.session_state.qa_system.enabled_files]
+            st.info(f"**Q&A will use:** {', '.join(enabled_files_list[:3])}{'...' if len(enabled_files_list) > 3 else ''}")
+        else:
+            st.warning("⚠️ No files are currently enabled for Q&A. Please enable files from the sidebar.")
+        
         # Question input
         question = st.text_area(
             "Enter your question:",
@@ -514,20 +634,24 @@ def main():
             height=100
         )
         
-        if st.button("Get Answer", type="primary", disabled=not st.session_state.qa_system.loaded_files):
+        if st.button("Get Answer", type="primary", disabled=not st.session_state.qa_system.enabled_files):
             if question.strip():
-                answer = st.session_state.qa_system.generate_answer(question)
-                
-                # Add to chat history
-                st.session_state.chat_history.append({
-                    "question": question,
-                    "answer": answer,
-                    "files": len(st.session_state.qa_system.loaded_files)
-                })
-                
-                # Display answer
-                st.subheader("🤖 Answer:")
-                st.write(answer)
+                # Double-check that we have document text
+                if not st.session_state.qa_system.document_text.strip():
+                    st.error("No document content available. Please make sure files are properly loaded and enabled.")
+                else:
+                    answer = st.session_state.qa_system.generate_answer(question)
+                    
+                    # Add to chat history
+                    st.session_state.chat_history.append({
+                        "question": question,
+                        "answer": answer,
+                        "files": len(st.session_state.qa_system.enabled_files)
+                    })
+                    
+                    # Display answer
+                    st.subheader("🤖 Answer:")
+                    st.write(answer)
             else:
                 st.warning("Please enter a question.")
     
@@ -551,7 +675,7 @@ def main():
         st.metric("Loaded Documents", len(st.session_state.qa_system.loaded_files))
     
     with col2:
-        st.metric("Total Characters", f"{len(st.session_state.qa_system.document_text):,}")
+        st.metric("Active Documents", len(st.session_state.qa_system.enabled_files))
     
     with col3:
         st.metric("Chat History", len(st.session_state.chat_history))
