@@ -8,5 +8,10 @@
     "question": "what is global warming",
     "answer": "Based on the provided documents:\n\nGlobal warming is defined as the human-enhanced warming of the atmosphere, which is due to human activities such as burning fossil fuels, clearing forests, and growing crops releasing carbon dioxide, methane, and nitrogen oxide into the atmosphere in increasing amounts. The CO 2 produced by human activities is the largest contributor to global warming. Methane is a more powerful greenhouse gas than CO 2, but has a shorter lifetime.\n\n",
     "files": 22
+  },
+  {
+    "question": "what are the requirements?",
+    "answer": "The requirements are: google-generativeai>=0.3.0, PyPDF2>=3.0.0, python-docx>=1.1.0, and python-dotenv>=1.0.0.\n",
+    "files": 1
   }
 ]

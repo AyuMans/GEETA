@@ -34,10 +34,12 @@ class UserManager:
     def __init__(self):
         self.users_file = "users.json"
         self.chat_history_dir = "chat_histories"
+        self.file_states_dir = "file_states"  # New directory for file states
         self.load_users()
         
-        # Create chat history directory if it doesn't exist
+        # Create directories if they don't exist
         os.makedirs(self.chat_history_dir, exist_ok=True)
+        os.makedirs(self.file_states_dir, exist_ok=True)
     
     def load_users(self):
         """Load users from JSON file"""
@@ -149,6 +151,50 @@ class UserManager:
             print(f"Error clearing chat history for {username}: {e}")
             return False
 
+    def get_user_file_states_file(self, username):
+        """Get the file states file path for a user"""
+        safe_username = "".join(c for c in username if c.isalnum() or c in ('-', '_')).rstrip()
+        return os.path.join(self.file_states_dir, f"{safe_username}_files.json")
+    
+    def save_user_file_states(self, username, file_states):
+        """Save file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            with open(states_file, 'w', encoding='utf-8') as f:
+                json.dump(file_states, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving file states for {username}: {e}")
+            return False
+    
+    def load_user_file_states(self, username):
+        """Load file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            if os.path.exists(states_file):
+                with open(states_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading file states for {username}: {e}")
+        return {
+            'loaded_files': [],
+            'enabled_files': [],
+            'file_contents': {},
+            'folder_path': None,
+            'temp_folders': []
+        }
+    
+    def clear_user_file_states(self, username):
+        """Clear file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            if os.path.exists(states_file):
+                os.remove(states_file)
+            return True
+        except Exception as e:
+            print(f"Error clearing file states for {username}: {e}")
+            return False
+
 def save_chat_history():
     """Save chat history for current user"""
     try:
@@ -190,6 +236,44 @@ def cleanup_temp_folders():
                 except:
                     pass
 
+def save_file_states():
+    """Save file states for current user"""
+    try:
+        if st.session_state.current_user and st.session_state.qa_system:
+            file_states = {
+                'loaded_files': st.session_state.qa_system.loaded_files,
+                'enabled_files': st.session_state.qa_system.enabled_files,
+                'file_contents': st.session_state.qa_system.file_contents,
+                'folder_path': st.session_state.qa_system.folder_path,
+                'temp_folders': st.session_state.temp_folders
+            }
+            success = st.session_state.user_manager.save_user_file_states(
+                st.session_state.current_user, 
+                file_states
+            )
+            if not success:
+                print("Failed to save file states")
+        else:
+            print("No user logged in - cannot save file states")
+    except Exception as e:
+        print(f"Error saving file states: {e}")
+
+def load_file_states():
+    """Load file states for current user"""
+    try:
+        if st.session_state.current_user:
+            file_states = st.session_state.user_manager.load_user_file_states(
+                st.session_state.current_user
+            )
+            print(f"Loaded file states for {st.session_state.current_user}")
+            return file_states
+        else:
+            print("No user logged in - cannot load file states")
+            return None
+    except Exception as e:
+        print(f"Error loading file states: {e}")
+        return None
+
 # Register cleanup
 atexit.register(cleanup_temp_folders)
 
@@ -207,9 +291,13 @@ class GeminiDocumentQA:
         self.enabled_files = []  # Files currently enabled for Q&A
         self.file_contents = {}  # Store file contents separately
         self.folder_path = None
+        
+        # New: Size limits for automatic splitting (in characters)
+        self.max_file_size = 500000  # ~500K characters per file
+        self.max_chunk_size = 10000  # For processing large documents
     
     def load_document(self, file_path):
-        """Load a single document from various formats"""
+        """Load a single document from various formats with automatic splitting for large files"""
         file_extension = file_path.lower().split('.')[-1]
         
         try:
@@ -222,18 +310,101 @@ class GeminiDocumentQA:
             else:
                 raise ValueError(f"Unsupported file format: {file_extension}")
             
-            # Store file content separately
-            self.file_contents[file_path] = text
-            self.loaded_files.append(file_path)
-            self.enabled_files.append(file_path)  # Enable by default
-            
-            # REBUILD DOCUMENT TEXT IMMEDIATELY AFTER ADDING FILE
-            self._rebuild_document_text()
-            
-            return True, f"Document '{os.path.basename(file_path)}' loaded successfully!"
+            # Check if file is too large and needs splitting
+            if len(text) > self.max_file_size:
+                st.warning(f"📁 Large document detected! Splitting '{os.path.basename(file_path)}' into manageable chunks...")
+                return self._split_and_load_large_document(file_path, text, file_extension)
+            else:
+                # Store file content normally
+                self.file_contents[file_path] = text
+                self.loaded_files.append(file_path)
+                self.enabled_files.append(file_path)
+                self._rebuild_document_text()
+                return True, f"Document '{os.path.basename(file_path)}' loaded successfully!"
             
         except Exception as e:
             return False, f"Error loading document: {str(e)}"
+    
+    def _split_and_load_large_document(self, file_path, full_text, file_extension):
+        """Split a large document into smaller chunks and load them as separate virtual files"""
+        try:
+            # Split the text into chunks
+            chunks = self._split_text_into_chunks(full_text)
+            
+            # Create virtual files for each chunk
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            successful_chunks = 0
+            
+            for i, chunk in enumerate(chunks):
+                virtual_file_path = f"{file_path}_chunk_{i+1:03d}"
+                chunk_name = f"{base_name}_part_{i+1:03d}.{file_extension}"
+                
+                # Store chunk content
+                self.file_contents[virtual_file_path] = chunk
+                self.loaded_files.append(virtual_file_path)
+                self.enabled_files.append(virtual_file_path)
+                successful_chunks += 1
+            
+            # Rebuild document text
+            self._rebuild_document_text()
+            
+            return True, f"Large document split into {successful_chunks} chunks and loaded successfully!"
+            
+        except Exception as e:
+            return False, f"Error splitting large document: {str(e)}"
+    
+    def _split_text_into_chunks(self, text, chunk_size=None):
+        """Split text into chunks with intelligent boundaries"""
+        if chunk_size is None:
+            chunk_size = self.max_file_size
+        
+        chunks = []
+        start = 0
+        text_length = len(text)
+        
+        while start < text_length:
+            # Calculate end position
+            end = start + chunk_size
+            
+            if end >= text_length:
+                # Last chunk
+                chunks.append(text[start:])
+                break
+            
+            # Try to find a good breaking point
+            # Look for paragraph breaks first
+            paragraph_break = text.rfind('\n\n', start, end)
+            if paragraph_break != -1 and paragraph_break > start:
+                end = paragraph_break + 2
+            else:
+                # Look for sentence breaks
+                sentence_break = text.rfind('. ', start, end)
+                if sentence_break != -1 and sentence_break > start:
+                    end = sentence_break + 2
+                else:
+                    # Look for line breaks
+                    line_break = text.rfind('\n', start, end)
+                    if line_break != -1 and line_break > start:
+                        end = line_break + 1
+                    else:
+                        # Just split at the chunk size
+                        end = start + chunk_size
+            
+            chunks.append(text[start:end])
+            start = end
+        
+        return chunks
+    
+    def get_file_display_name(self, file_path):
+        """Get display name for files (handles both real and virtual split files)"""
+        basename = os.path.basename(file_path)
+        if '_chunk_' in file_path:
+            # This is a split file - format the name nicely
+            base_parts = os.path.splitext(basename.split('_chunk_')[0])[0]
+            chunk_num = basename.split('_chunk_')[1]
+            return f"📄 {base_parts} [Part {chunk_num}]"
+        else:
+            return f"📄 {basename}"
     
     def toggle_file(self, file_path, enabled):
         """Enable or disable a file for Q&A"""
@@ -244,6 +415,9 @@ class GeminiDocumentQA:
         
         # Rebuild document text from enabled files
         self._rebuild_document_text()
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
     
     def _rebuild_document_text(self):
         """Rebuild the combined document text from enabled files"""
@@ -359,16 +533,37 @@ class GeminiDocumentQA:
         self.enabled_files = []
         self.file_contents = {}
         self.folder_path = None
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
     
     def remove_file(self, file_path):
-        """Completely remove a file from the system"""
-        if file_path in self.loaded_files:
-            self.loaded_files.remove(file_path)
-        if file_path in self.enabled_files:
-            self.enabled_files.remove(file_path)
-        if file_path in self.file_contents:
-            del self.file_contents[file_path]
+        """Completely remove a file from the system - updated to handle split files"""
+        # If removing a split file, remove all chunks from the same original file
+        files_to_remove = []
+        
+        if '_chunk_' in file_path:
+            # This is a split file - find all chunks from the same original
+            original_base = file_path.split('_chunk_')[0]
+            for loaded_file in self.loaded_files:
+                if loaded_file.startswith(original_base + '_chunk_'):
+                    files_to_remove.append(loaded_file)
+        else:
+            files_to_remove = [file_path]
+        
+        # Remove all identified files
+        for file_to_remove in files_to_remove:
+            if file_to_remove in self.loaded_files:
+                self.loaded_files.remove(file_to_remove)
+            if file_to_remove in self.enabled_files:
+                self.enabled_files.remove(file_to_remove)
+            if file_to_remove in self.file_contents:
+                del self.file_contents[file_to_remove]
+        
         self._rebuild_document_text()
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
     
     def generate_answer(self, question):
         """Generate answer using all enabled documents"""
@@ -513,8 +708,9 @@ def main():
     if 'show_register' not in st.session_state:
         st.session_state.show_register = False
     
+    # Initialize qa_system as EMPTY - we'll create it fresh for each user
     if 'qa_system' not in st.session_state:
-        st.session_state.qa_system = GeminiDocumentQA()
+        st.session_state.qa_system = None
     
     if 'temp_folders' not in st.session_state:
         st.session_state.temp_folders = []
@@ -534,14 +730,40 @@ def main():
         show_auth_screen()
         return
     
-    # ONLY AFTER LOGIN: Load the user's specific chat history
+    # ONLY AFTER LOGIN: Initialize qa_system and load user's specific data
     if st.session_state.logged_in and st.session_state.current_user:
+        # Create fresh qa_system for this user if it doesn't exist
+        if st.session_state.qa_system is None:
+            try:
+                st.session_state.qa_system = GeminiDocumentQA()
+                print(f"Created fresh qa_system for user: {st.session_state.current_user}")
+                
+                # Load file states for this user
+                file_states = load_file_states()
+                if file_states:
+                    # Restore the file states
+                    st.session_state.qa_system.loaded_files = file_states['loaded_files']
+                    st.session_state.qa_system.enabled_files = file_states['enabled_files']
+                    st.session_state.qa_system.file_contents = file_states['file_contents']
+                    st.session_state.qa_system.folder_path = file_states['folder_path']
+                    st.session_state.temp_folders = file_states['temp_folders']
+                    
+                    # Rebuild document text from enabled files
+                    st.session_state.qa_system._rebuild_document_text()
+                    print(f"Restored {len(st.session_state.qa_system.loaded_files)} files for user {st.session_state.current_user}")
+                
+            except Exception as e:
+                st.error(f"Failed to initialize Gemini API: {e}")
+                return
+        
         # Load chat history for the current user
         if not st.session_state.chat_history:  # Only load if empty
             st.session_state.chat_history = load_chat_history()
+            print(f"Loaded {len(st.session_state.chat_history)} chat history entries for {st.session_state.current_user}")
     
     # If logged in, show the main app
     show_main_application()
+    
 def show_auth_screen():
     """Show login or registration screen"""
     st.markdown("""
@@ -666,14 +888,31 @@ def show_main_application():
     with st.sidebar:
         st.success(f"👤 Signed in as: **{st.session_state.current_user}**")
         if st.button("🚪 Logout", use_container_width=True):
-            # Save chat history before logging out
+            # Save chat history and file states before logging out
             save_chat_history()
+            save_file_states()
+            
+            # Reset all user-specific session state
             st.session_state.logged_in = False
             st.session_state.current_user = None
-            st.session_state.chat_history = []  # Clear chat history on logout
+            st.session_state.qa_system = None  # Reset qa_system
+            st.session_state.chat_history = []  # Clear chat history
+            st.session_state.temp_folders = []  # Clear temp folders
+            st.session_state.file_states = {}  # Clear file states
+            st.session_state.show_history = False
+            
             st.rerun()
         st.markdown("---")
-    
+        
+        # Safety check - ensure qa_system is initialized
+        if st.session_state.qa_system is None:
+            st.error("Document system not properly initialized. Please log out and log in again.")
+            if st.button("🔄 Restart Application"):
+                st.session_state.logged_in = False
+                st.session_state.current_user = None
+                st.session_state.qa_system = None
+                st.rerun()
+            return
     
     # Custom CSS with glowy effects (your existing CSS)
     st.markdown("""
@@ -785,10 +1024,6 @@ def show_main_application():
     # Display the main header ONLY ONCE
     st.markdown('<h1 class="main-header">📚 G.E.E.T.A</h1>', unsafe_allow_html=True)
     
-    # Initialize session state for the main app
-  
-    
-    
     # Sidebar with tabs
     with st.sidebar:
         # History button at the top
@@ -844,15 +1079,33 @@ def show_main_application():
                 if st.button("Upload Selected Files", type="primary", key="upload_files"):
                     if uploaded_files:
                         success_count = 0
-                        for uploaded_file in uploaded_files:
+                        split_count = 0
+                        
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        for i, uploaded_file in enumerate(uploaded_files):
+                            status_text.text(f"Processing {uploaded_file.name}...")
+                            progress_bar.progress((i) / len(uploaded_files))
+                            
                             success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
                             if success:
                                 st.success(f"✅ {message}")
                                 success_count += 1
+                                if "split" in message.lower():
+                                    split_count += 1
                             else:
                                 st.error(f"❌ {message}")
+                        
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         if success_count > 0:
-                            st.success(f"🎉 Successfully loaded {success_count} files!")
+                            save_file_states()
+                            summary_msg = f"🎉 Successfully loaded {success_count} files!"
+                            if split_count > 0:
+                                summary_msg += f" ({split_count} were split into chunks)"
+                            st.success(summary_msg)
                             st.rerun()
                     else:
                         st.warning("Please select files to upload.")
@@ -912,6 +1165,7 @@ def show_main_application():
                                 success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
                                 
                                 if success:
+                                    save_file_states()  # Save after loading ZIP
                                     st.success(f"✅ {message}")
                                     st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
                                     st.rerun()
@@ -978,12 +1232,15 @@ def show_main_application():
                                 # Create a unique key for each file button
                                 file_button_key = f"file_toggle_{file_path}"
                                 
+                                # Get display name (handles split files)
+                                display_name = st.session_state.qa_system.get_file_display_name(file_path)
+                                
                                 # Determine button label and style based on enabled state
                                 if current_enabled:
-                                    button_label = f"✅ {os.path.basename(file_path)}"
+                                    button_label = f"✅ {display_name}"
                                     button_type = "primary"
                                 else:
-                                    button_label = f"❌ {os.path.basename(file_path)}"
+                                    button_label = f"❌ {display_name}"
                                     button_type = "secondary"
                                 
                                 # Clickable file button to toggle selection
@@ -1000,7 +1257,8 @@ def show_main_application():
                         # Remove files after iteration
                         for file_path in files_to_remove:
                             st.session_state.qa_system.remove_file(file_path)
-                            st.success(f"Removed: {os.path.basename(file_path)}")
+                            display_name = st.session_state.qa_system.get_file_display_name(file_path)
+                            st.success(f"Removed: {display_name}")
                             st.rerun()
                 else:
                     st.info("No documents loaded. Upload files or a ZIP folder to get started.")
@@ -1032,6 +1290,31 @@ def show_main_application():
                 st.write(f"**Active files:** {enabled_count}/{total_count}")
                 st.write(f"**Text length:** {len(st.session_state.qa_system.document_text):,} characters")
                 
+                with st.expander("📂 File Details"):
+                    # Count regular vs split files
+                    regular_files = []
+                    split_files = {}
+                    
+                    for file_path in st.session_state.qa_system.loaded_files:
+                        if '_chunk_' in file_path:
+                            # This is a split file
+                            base_name = file_path.split('_chunk_')[0]
+                            if base_name not in split_files:
+                                split_files[base_name] = []
+                            split_files[base_name].append(file_path)
+                        else:
+                            regular_files.append(file_path)
+                    
+                    st.write(f"**Regular files:** {len(regular_files)}")
+                    st.write(f"**Split documents:** {len(split_files)}")
+                    
+                    if split_files:
+                        st.write("**Split documents details:**")
+                        for base_name, chunks in split_files.items():
+                            display_name = st.session_state.qa_system.get_file_display_name(base_name + "_chunk_001")
+                            base_display = display_name.split(' [Part')[0]  # Remove part number
+                            st.write(f"• {base_display}: {len(chunks)} parts")
+                
                 with st.expander("📂 ZIP Contents Overview"):
                     if st.session_state.qa_system.folder_path:
                         folder_files = st.session_state.qa_system.get_folder_files_info()
@@ -1057,13 +1340,34 @@ def show_main_application():
             else:
                 st.error("❌ Gemini API Key Missing")
                 st.info("Set GEMINI_API_KEY in your .env file")
+            
+            # Add settings section
+            st.markdown("---")
+            st.subheader("⚙️ Document Settings")
+            
+            with st.expander("Large Document Handling"):
+                st.info("Automatically split large files to avoid API limits")
+                
+                # Configurable size limits
+                max_size = st.slider(
+                    "Max file size before splitting (characters)",
+                    min_value=100000,
+                    max_value=1000000,
+                    value=500000,
+                    step=50000,
+                    help="Files larger than this will be automatically split into chunks"
+                )
+                
+                if st.button("Apply Settings", use_container_width=True):
+                    st.session_state.qa_system.max_file_size = max_size
+                    st.success("Settings updated!")
     
     # Main content area - only question input now
     st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
     
     # Show active files info
     if st.session_state.qa_system.enabled_files:
-        enabled_files_list = [os.path.basename(f) for f in st.session_state.qa_system.enabled_files]
+        enabled_files_list = [st.session_state.qa_system.get_file_display_name(f) for f in st.session_state.qa_system.enabled_files]
         st.info(f"**Q&A will use:** {', '.join(enabled_files_list[:3])}{'...' if len(enabled_files_list) > 3 else ''}")
     else:
         st.warning("⚠️ No files are currently enabled for Q&A. Please enable files from the sidebar.")
@@ -1112,8 +1416,6 @@ def show_main_application():
     with col4:
         folders_count = len(st.session_state.temp_folders)
         st.metric("Uploaded ZIPs", folders_count)
-        
-
 
 #run 
 if __name__ == "__main__":
