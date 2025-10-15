@@ -1,0 +1,12 @@
+[
+  {
+    "question": "list all redhat repo",
+    "answer": "Based on the document content, here are the Red Hat repositories mentioned:\n\n*   `http://SeaHostFactory01.meteorcomm.lan/repos/rhel-server-7.6-x86_64-dvd/`\n*   `http://repo.meteorcomm.lan/RedHat/rhel-server-6.x-x86_64-updates/`\n*   `http://10.6.0.10/rhel-server-6.7-x86_64-dvd/`\n*   `http://10.6.0.10/rhel-server-6.7-i386-dvd/`\n*   `http://seahostfactory01.meteorcomm.lan/repos/rhel-server-6.10-x86_64-dvd/`\n*   `http://mirror.centos.org/centos/7/os/x86_64/`\n*   `http://mirror.centos.org/centos/6/os/i386/`\n*    `https://vault.centos.org/6.10/os/x86_64/`\n*   `http://seahostfactory01.meteorcomm.lan/repos/rhel-server-7.8-x86_64-dvd/`\n*   `http://mirror.centos.org/centos/8/BaseOS/x86_64/os/`\n*   `dnf config-manager --add-repo http://seahostfactory01.meteorcomm.lan/repos/rhel-8.1-x86_64-dvd/AppStream`\n*  `dnf config-manager --add-repo http://seahostfactory01.meteorcomm.lan/repos/rhel-8.1-x86_64-dvd/BaseOS`\n*   `dnf config-manager --add-repo http://seahostfactory01.meteorcomm.lan/repos/rhel-8.2-x86_64-dvd/BaseOS`\n*   `dnf config-manager --add-repo http://seahostfactory01.meteorcomm.lan/repos/rhel-8.2-x86_64-dvd/AppStream`\n*   `sudo subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms`\n",
+    "files": 1
+  },
+  {
+    "question": "how to install java",
+    "answer": "To install Java, based on the provided documents, you can follow these steps:\n\n*   **Using yum:**\n\n    *   For Jenkins java upgrade notes, \"use the mcc rhel-server-6.x-x86\\_64-updates repo to install java 8.  Otherwise, jenkins doesn't work.\"\n    *   `sudo yum-config-manager --add-repo http://repo.meteorcomm.lan/RedHat/rhel-server-6.x-x86_64-updates/`\n    *   `sudo yum install java-1.8\\*`\n*   **General yum install**:\n    *   For CTCSM build node setup, use `sudo yum install java-1.8\\*`\n*   **Within setup script for installing software**\n    *   `sudo yum install -y --disablerepo=\\* --enablerepo=Sea\\* wget cmake boost boost-devel libssh2-devel libuuid-devel libarchive-devel libcurl-devel gmock gmock-devel gtest gtest-devel meld openslp opentracing-cpp-devel prometheus-cpp prometheus-cpp-devel protobuf protobuf-devel protobuf-compiler python-devel zipkin-cpp-opentracing-devel lcov tbb tbb-devel graphviz perl-Digest-MD5 cmake-gmock-module java jpackage-utils sqlite-devel gnutls-devel sshpass jq doxygen java-1.8\\* yaml-cpp`\n\n",
+    "files": 1
+  }
+]

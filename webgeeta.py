@@ -9,6 +9,12 @@ import tempfile
 import zipfile
 from dotenv import load_dotenv
 import shutil
+import json
+import os
+from datetime import datetime
+import secrets
+import hashlib
+import atexit
 
 # Add service-specific configuration
 if 'win32service' in sys.modules or os.name == 'nt':
@@ -22,6 +28,171 @@ if 'win32service' in sys.modules or os.name == 'nt':
     
 load_dotenv()
 
+# ===== USER MANAGEMENT AND CHAT HISTORY FUNCTIONS =====
+class UserManager:
+    def __init__(self):
+        self.users_file = "users.json"
+        self.chat_history_dir = "chat_histories"
+        self.load_users()
+        
+        # Create chat history directory if it doesn't exist
+        os.makedirs(self.chat_history_dir, exist_ok=True)
+    
+    def load_users(self):
+        """Load users from JSON file"""
+        try:
+            if os.path.exists(self.users_file):
+                with open(self.users_file, 'r') as f:
+                    self.users = json.load(f)
+            else:
+                self.users = {}
+        except Exception:
+            self.users = {}
+    
+    def save_users(self):
+        """Save users to JSON file"""
+        try:
+            with open(self.users_file, 'w') as f:
+                json.dump(self.users, f, indent=2)
+            return True
+        except Exception:
+            return False
+    
+    def hash_password(self, password):
+        """Hash password with salt"""
+        salt = secrets.token_hex(16)
+        return hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex() + ':' + salt
+    
+    def verify_password(self, stored_password, provided_password):
+        """Verify hashed password"""
+        try:
+            hashed, salt = stored_password.split(':')
+            computed_hash = hashlib.pbkdf2_hmac('sha256', provided_password.encode(), salt.encode(), 100000).hex()
+            return hashed == computed_hash
+        except:
+            return False
+    
+    def register_user(self, username, password):
+        """Register a new user"""
+        if username in self.users:
+            return False, "Username already exists"
+        
+        if len(password) < 4:
+            return False, "Password must be at least 4 characters"
+        
+        self.users[username] = {
+            'password_hash': self.hash_password(password),
+            'created_at': datetime.now().isoformat(),
+            'last_login': None
+        }
+        
+        if self.save_users():
+            # Create empty chat history file for new user
+            self.save_user_chat_history(username, [])
+            return True, "Registration successful!"
+        else:
+            return False, "Registration failed - could not save user data"
+    
+    def login_user(self, username, password):
+        """Login user"""
+        if username not in self.users:
+            return False, "User not found"
+        
+        if self.verify_password(self.users[username]['password_hash'], password):
+            self.users[username]['last_login'] = datetime.now().isoformat()
+            self.save_users()
+            return True, "Login successful!"
+        else:
+            return False, "Invalid password"
+    
+    def user_exists(self):
+        """Check if any users exist"""
+        return len(self.users) > 0
+    
+    def get_user_chat_history_file(self, username):
+        """Get the chat history file path for a user"""
+        # Sanitize username to create safe filename
+        safe_username = "".join(c for c in username if c.isalnum() or c in ('-', '_')).rstrip()
+        return os.path.join(self.chat_history_dir, f"{safe_username}_history.json")
+    
+    def save_user_chat_history(self, username, chat_history):
+        """Save chat history for a specific user"""
+        try:
+            history_file = self.get_user_chat_history_file(username)
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(chat_history, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving chat history for {username}: {e}")
+            return False
+    
+    def load_user_chat_history(self, username):
+        """Load chat history for a specific user"""
+        try:
+            history_file = self.get_user_chat_history_file(username)
+            if os.path.exists(history_file):
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading chat history for {username}: {e}")
+        return []
+    
+    def clear_user_chat_history(self, username):
+        """Clear chat history for a specific user"""
+        try:
+            history_file = self.get_user_chat_history_file(username)
+            if os.path.exists(history_file):
+                os.remove(history_file)
+            return True
+        except Exception as e:
+            print(f"Error clearing chat history for {username}: {e}")
+            return False
+
+def save_chat_history():
+    """Save chat history for current user"""
+    try:
+        if st.session_state.current_user:
+            success = st.session_state.user_manager.save_user_chat_history(
+                st.session_state.current_user, 
+                st.session_state.chat_history
+            )
+            if not success:
+                print("Failed to save chat history")
+        else:
+            print("No user logged in - cannot save chat history")
+    except Exception as e:
+        print(f"Error saving chat history: {e}")
+
+def load_chat_history():
+    """Load chat history for current user"""
+    try:
+        if st.session_state.current_user:
+            history = st.session_state.user_manager.load_user_chat_history(
+                st.session_state.current_user
+            )
+            print(f"Loaded {len(history)} chat history entries for {st.session_state.current_user}")
+            return history
+        else:
+            print("No user logged in - cannot load chat history")
+            return []
+    except Exception as e:
+        print(f"Error loading chat history: {e}")
+        return []
+
+def cleanup_temp_folders():
+    """Clean up temporary folders when the app closes"""
+    if 'temp_folders' in st.session_state:
+        for temp_dir in st.session_state.temp_folders:
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+
+# Register cleanup
+atexit.register(cleanup_temp_folders)
+
+# ===== MAIN APPLICATION CLASSES AND FUNCTIONS =====
 class GeminiDocumentQA:
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
@@ -328,6 +499,161 @@ def extract_and_process_zip(uploaded_zip):
         return None
 
 def main():
+    # Initialize ALL session state variables at the start
+    if 'user_manager' not in st.session_state:
+        st.session_state.user_manager = UserManager()
+    
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = None
+    
+    if 'show_register' not in st.session_state:
+        st.session_state.show_register = False
+    
+    if 'qa_system' not in st.session_state:
+        st.session_state.qa_system = GeminiDocumentQA()
+    
+    if 'temp_folders' not in st.session_state:
+        st.session_state.temp_folders = []
+    
+    if 'file_states' not in st.session_state:
+        st.session_state.file_states = {}
+    
+    if 'show_history' not in st.session_state:
+        st.session_state.show_history = False
+    
+    # Initialize chat history as EMPTY - we'll load it only after login
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    
+    # Show login/register screen if not logged in
+    if not st.session_state.logged_in:
+        show_auth_screen()
+        return
+    
+    # ONLY AFTER LOGIN: Load the user's specific chat history
+    if st.session_state.logged_in and st.session_state.current_user:
+        # Load chat history for the current user
+        if not st.session_state.chat_history:  # Only load if empty
+            st.session_state.chat_history = load_chat_history()
+    
+    # If logged in, show the main app
+    show_main_application()
+def show_auth_screen():
+    """Show login or registration screen"""
+    st.markdown("""
+    <style>
+    }
+    .auth-title {
+        text-align: center;
+        font-size: 2.5rem;
+        margin-bottom: 10px;
+        background: linear-gradient(90deg, #fff, #f0f0f0);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    .auth-subtitle {
+        text-align: center;
+        margin-bottom: 30px;
+        opacity: 0.9;
+    }
+    .stButton > button {
+        width: 100%;
+        border-radius: 8px;
+        height: 3rem;
+        font-size: 1.1rem;
+        margin-top: 10px;
+    }
+    .secondary-btn {
+        background-color: transparent !important;
+        border: 2px solid white !important;
+        color: white !important;
+    }
+    .secondary-btn:hover {
+        background-color: rgba(255,255,255,0.1) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown('<div class="auth-container">', unsafe_allow_html=True)
+    
+    # Check if users exist to show login, otherwise show registration
+    users_exist = st.session_state.user_manager.user_exists()
+    
+    # Check if we should show registration form (either no users exist or user clicked "Create New Account")
+    show_registration = not users_exist or st.session_state.get('show_register', False)
+    
+    if show_registration:
+        # Registration form
+        st.markdown('<h1 class="auth-title">👋 Welcome to G.E.E.T.A</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="auth-subtitle">Create your account to get started</p>', unsafe_allow_html=True)
+        
+        with st.form("register_form"):
+            username = st.text_input("👤 Choose a username", placeholder="Enter your username")
+            password = st.text_input("🔑 Create password", type="password", placeholder="Enter your password")
+            confirm_password = st.text_input("✅ Confirm password", type="password", placeholder="Re-enter your password")
+            
+            submitted = st.form_submit_button("🚀 Create Account & Start", use_container_width=True)
+            
+            if submitted:
+                if not username or not password:
+                    st.error("❌ Please fill in all fields")
+                elif password != confirm_password:
+                    st.error("❌ Passwords don't match")
+                else:
+                    success, message = st.session_state.user_manager.register_user(username, password)
+                    if success:
+                        st.session_state.logged_in = True
+                        st.session_state.current_user = username
+                        st.session_state.show_register = False  # Reset the flag
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+        
+        # If users exist, show option to go back to login
+        if users_exist:
+            if st.button("⬅️ Back to Login", use_container_width=True):
+                st.session_state.show_register = False
+                st.rerun()
+    
+    else:
+        # Login for existing users
+        st.markdown('<h1 class="auth-title">🔒 Welcome Back</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="auth-subtitle">Sign in to access your documents</p>', unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            username = st.text_input("👤 Username", placeholder="Enter your username")
+            password = st.text_input("🔑 Password", type="password", placeholder="Enter your password")
+            
+            submitted = st.form_submit_button("🚀 Sign In", use_container_width=True)
+            
+            if submitted:
+                if not username or not password:
+                    st.error("❌ Please fill in all fields")
+                else:
+                    success, message = st.session_state.user_manager.login_user(username, password)
+                    if success:
+                        st.session_state.logged_in = True
+                        st.session_state.current_user = username
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+        
+        # Option to create new account
+        if st.button("📝 Create New Account", use_container_width=True, key="create_account_btn"):
+            st.session_state.show_register = True
+            st.rerun()
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def show_main_application():
+    """Show the main application after login"""
+    # Set page config only once at the beginning
     st.set_page_config(
         page_title="G.E.E.T.A",
         page_icon="📚",
@@ -335,7 +661,20 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS with glowy effects
+    # Add user info to sidebar
+    with st.sidebar:
+        st.success(f"👤 Signed in as: **{st.session_state.current_user}**")
+        if st.button("🚪 Logout", use_container_width=True):
+            # Save chat history before logging out
+            save_chat_history()
+            st.session_state.logged_in = False
+            st.session_state.current_user = None
+            st.session_state.chat_history = []  # Clear chat history on logout
+            st.rerun()
+        st.markdown("---")
+    
+    
+    # Custom CSS with glowy effects (your existing CSS)
     st.markdown("""
     <style>
     .main-header {
@@ -442,306 +781,319 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
+    # Display the main header ONLY ONCE
     st.markdown('<h1 class="main-header">📚 G.E.E.T.A</h1>', unsafe_allow_html=True)
     
-    # Initialize session state
-    if 'qa_system' not in st.session_state:
-        st.session_state.qa_system = GeminiDocumentQA()
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    if 'temp_folders' not in st.session_state:
-        st.session_state.temp_folders = []
-    if 'file_states' not in st.session_state:
-        st.session_state.file_states = {}
+    # Initialize session state for the main app
+  
+    
     
     # Sidebar with tabs
     with st.sidebar:
-        st.header("📁 Document Management")
+        # History button at the top
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button("📜 History", use_container_width=True, type="primary" if st.session_state.show_history else "secondary"):
+                st.session_state.show_history = not st.session_state.show_history
+                st.rerun()
         
-        # Create tabs
-        tab1, tab2, tab3 = st.tabs(["📄 Individual Files", "📁 ZIP Folder", "⚡ Active Files"])
+        st.markdown("---")
         
-        # Tab 1: Individual Files
-        with tab1:
-            st.subheader("Upload Individual Files")
-            uploaded_files = st.file_uploader(
-                "Choose files",
-                type=['pdf', 'docx', 'txt', 'md'],
-                accept_multiple_files=True,
-                help="Supported formats: PDF, DOCX, TXT, MD",
-                key="individual_files"
-            )
+        if st.session_state.show_history:
+            # History view
+            st.markdown('<h2 class="glow-header">📜 Chat History</h2>', unsafe_allow_html=True)
             
-            if st.button("Upload Selected Files", type="primary", key="upload_files"):
-                if uploaded_files:
-                    success_count = 0
-                    for uploaded_file in uploaded_files:
-                        success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
-                        if success:
-                            st.success(f"✅ {message}")
-                            success_count += 1
-                        else:
-                            st.error(f"❌ {message}")
-                    if success_count > 0:
-                        st.success(f"🎉 Successfully loaded {success_count} files!")
-                        st.rerun()
-                else:
-                    st.warning("Please select files to upload.")
-            
-            # Quick actions for individual files tab
-            if st.session_state.qa_system.loaded_files:
-                st.markdown("---")
-                st.subheader("Quick Actions")
-                col1, col2 = st.columns(2)
+            if not st.session_state.chat_history:
+                st.info("No questions asked yet. Ask questions to see history here.")
+            else:
+                # Display chat history
+                for i, chat in enumerate(reversed(st.session_state.chat_history)):
+                    with st.expander(f"Q: {chat['question'][:50]}...", expanded=i==0):
+                        st.write(f"**Question:** {chat['question']}")
+                        st.write(f"**Answer:** {chat['answer']}")
+                        st.caption(f"Based on {chat['files']} documents")
                 
-                with col1:
-                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab1"):
-                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
-                
-                with col2:
-                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab1"):
-                        st.session_state.qa_system.enabled_files = []
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
+                # Clear history button
+                if st.button("🗑️ Clear History", type="secondary", use_container_width=True):
+                    st.session_state.chat_history = []
+                    save_chat_history()
+                    st.success("Chat history cleared!")
+                    st.rerun()
+            
+            st.markdown("---")
         
-        # Tab 2: ZIP Folder
-        with tab2:
-            st.subheader("Upload ZIP Folder")
+        else:
+            # Normal document management view
+            st.header("📁 Document Management")
             
-            st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
-            st.write("**Upload a ZIP file containing documents**")
-            st.markdown("""
-            <div class="zip-info">
-            <strong>📦 ZIP File Requirements:</strong><br>
-            • Can contain PDF, DOCX, TXT, MD files<br>
-            • Supports nested folders<br>
-            • Files are automatically extracted and processed
-            </div>
-            """, unsafe_allow_html=True)
+            # Create tabs
+            tab1, tab2, tab3 = st.tabs(["📄 Individual Files", "📁 ZIP Folder", "⚡ Active Files"])
             
-            uploaded_zip = st.file_uploader(
-                "Choose a ZIP file",
-                type=['zip'],
-                key="folder_upload",
-                help="Upload a ZIP file containing your documents (PDF, DOCX, TXT, MD)"
-            )
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            if st.button("📂 Extract and Load ZIP Contents", type="primary", key="load_zip"):
-                if uploaded_zip:
-                    with st.spinner("Extracting ZIP file and processing documents..."):
-                        # Extract ZIP to temporary directory
-                        temp_dir = extract_and_process_zip(uploaded_zip)
-                        
-                        if temp_dir:
-                            # Store temp directory for cleanup
-                            st.session_state.temp_folders.append(temp_dir)
-                            
-                            # Load all supported documents from the extracted folder
-                            success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
-                            
+            # Tab 1: Individual Files
+            with tab1:
+                st.subheader("Upload Individual Files")
+                uploaded_files = st.file_uploader(
+                    "Choose files",
+                    type=['pdf', 'docx', 'txt', 'md'],
+                    accept_multiple_files=True,
+                    help="Supported formats: PDF, DOCX, TXT, MD",
+                    key="individual_files"
+                )
+                
+                if st.button("Upload Selected Files", type="primary", key="upload_files"):
+                    if uploaded_files:
+                        success_count = 0
+                        for uploaded_file in uploaded_files:
+                            success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
                             if success:
                                 st.success(f"✅ {message}")
-                                st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
-                                st.rerun()
+                                success_count += 1
                             else:
                                 st.error(f"❌ {message}")
-                        else:
-                            st.error("❌ Failed to extract ZIP file. Please check if it's a valid ZIP archive.")
-                else:
-                    st.warning("Please upload a ZIP file first.")
+                        if success_count > 0:
+                            st.success(f"🎉 Successfully loaded {success_count} files!")
+                            st.rerun()
+                    else:
+                        st.warning("Please select files to upload.")
+                
+                # Quick actions for individual files tab
+                if st.session_state.qa_system.loaded_files:
+                    st.markdown("---")
+                    st.subheader("Quick Actions")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab1"):
+                            st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab1"):
+                            st.session_state.qa_system.enabled_files = []
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
             
-            # Quick actions for ZIP folder tab
-            if st.session_state.qa_system.loaded_files:
-                st.markdown("---")
-                st.subheader("Quick Actions")
-                col1, col2 = st.columns(2)
+            # Tab 2: ZIP Folder
+            with tab2:
+                st.subheader("Upload ZIP Folder")
                 
-                with col1:
-                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab2"):
-                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
+                st.markdown('<div class="folder-upload">', unsafe_allow_html=True)
+                st.write("**Upload a ZIP file containing documents**")
+                st.markdown("""
+                <div class="zip-info">
+                <strong>📦 ZIP File Requirements:</strong><br>
+                • Can contain PDF, DOCX, TXT, MD files<br>
+                • Supports nested folders<br>
+                • Files are automatically extracted and processed
+                </div>
+                """, unsafe_allow_html=True)
                 
-                with col2:
-                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab2"):
-                        st.session_state.qa_system.enabled_files = []
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
-        
-        # Tab 3: Active Files Management
-        with tab3:
-            if st.session_state.qa_system.loaded_files:
-                st.subheader("File Management")
-                st.info("Click on file names to enable/disable them for Q&A")
+                uploaded_zip = st.file_uploader(
+                    "Choose a ZIP file",
+                    type=['zip'],
+                    key="folder_upload",
+                    help="Upload a ZIP file containing your documents (PDF, DOCX, TXT, MD)"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Quick actions
-                st.write("**Quick Actions:**")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab3"):
-                        st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
-                
-                with col2:
-                    if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab3"):
-                        st.session_state.qa_system.enabled_files = []
-                        st.session_state.qa_system._rebuild_document_text()
-                        st.rerun()
-                
-                # Display files as clickable items
-                with st.container():
-                    st.markdown('<div class="file-list">', unsafe_allow_html=True)
-                    
-                    files_to_remove = []
-                    
-                    for file_path in st.session_state.qa_system.loaded_files:
-                        col1, col2 = st.columns([6, 1])
-                        
-                        # Get current enabled state
-                        current_enabled = file_path in st.session_state.qa_system.enabled_files
-                        
-                        with col1:
-                            # Create a unique key for each file button
-                            file_button_key = f"file_toggle_{file_path}"
+                if st.button("📂 Extract and Load ZIP Contents", type="primary", key="load_zip"):
+                    if uploaded_zip:
+                        with st.spinner("Extracting ZIP file and processing documents..."):
+                            # Extract ZIP to temporary directory
+                            temp_dir = extract_and_process_zip(uploaded_zip)
                             
-                            # Determine button label and style based on enabled state
-                            if current_enabled:
-                                button_label = f"✅ {os.path.basename(file_path)}"
-                                button_type = "primary"
+                            if temp_dir:
+                                # Store temp directory for cleanup
+                                st.session_state.temp_folders.append(temp_dir)
+                                
+                                # Load all supported documents from the extracted folder
+                                success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
+                                
+                                if success:
+                                    st.success(f"✅ {message}")
+                                    st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {message}")
                             else:
-                                button_label = f"❌ {os.path.basename(file_path)}"
-                                button_type = "secondary"
-                            
-                            # Clickable file button to toggle selection
-                            if st.button(button_label, key=file_button_key, use_container_width=True, type=button_type):
-                                st.session_state.qa_system.toggle_file(file_path, not current_enabled)
-                                st.rerun()
+                                st.error("❌ Failed to extract ZIP file. Please check if it's a valid ZIP archive.")
+                    else:
+                        st.warning("Please upload a ZIP file first.")
+                
+                # Quick actions for ZIP folder tab
+                if st.session_state.qa_system.loaded_files:
+                    st.markdown("---")
+                    st.subheader("Quick Actions")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab2"):
+                            st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab2"):
+                            st.session_state.qa_system.enabled_files = []
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
+            
+            # Tab 3: Active Files Management
+            with tab3:
+                if st.session_state.qa_system.loaded_files:
+                    st.subheader("File Management")
+                    st.info("Click on file names to enable/disable them for Q&A")
+                    
+                    # Quick actions
+                    st.write("**Quick Actions:**")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("✅ Enable All", use_container_width=True, key="enable_all_tab3"):
+                            st.session_state.qa_system.enabled_files = st.session_state.qa_system.loaded_files.copy()
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("❌ Disable All", use_container_width=True, key="disable_all_tab3"):
+                            st.session_state.qa_system.enabled_files = []
+                            st.session_state.qa_system._rebuild_document_text()
+                            st.rerun()
+                    
+                    # Display files as clickable items
+                    with st.container():
+                        st.markdown('<div class="file-list">', unsafe_allow_html=True)
                         
-                        with col2:
-                            if st.button("🗑️", key=f"remove_{file_path}", help="Remove file"):
-                                files_to_remove.append(file_path)
-                    
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Remove files after iteration
-                    for file_path in files_to_remove:
-                        st.session_state.qa_system.remove_file(file_path)
-                        st.success(f"Removed: {os.path.basename(file_path)}")
-                        st.rerun()
+                        files_to_remove = []
+                        
+                        for file_path in st.session_state.qa_system.loaded_files:
+                            col1, col2 = st.columns([6, 1])
+                            
+                            # Get current enabled state
+                            current_enabled = file_path in st.session_state.qa_system.enabled_files
+                            
+                            with col1:
+                                # Create a unique key for each file button
+                                file_button_key = f"file_toggle_{file_path}"
+                                
+                                # Determine button label and style based on enabled state
+                                if current_enabled:
+                                    button_label = f"✅ {os.path.basename(file_path)}"
+                                    button_type = "primary"
+                                else:
+                                    button_label = f"❌ {os.path.basename(file_path)}"
+                                    button_type = "secondary"
+                                
+                                # Clickable file button to toggle selection
+                                if st.button(button_label, key=file_button_key, use_container_width=True, type=button_type):
+                                    st.session_state.qa_system.toggle_file(file_path, not current_enabled)
+                                    st.rerun()
+                            
+                            with col2:
+                                if st.button("🗑️", key=f"remove_{file_path}", help="Remove file"):
+                                    files_to_remove.append(file_path)
+                        
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Remove files after iteration
+                        for file_path in files_to_remove:
+                            st.session_state.qa_system.remove_file(file_path)
+                            st.success(f"Removed: {os.path.basename(file_path)}")
+                            st.rerun()
+                else:
+                    st.info("No documents loaded. Upload files or a ZIP folder to get started.")
+            
+            # Clear documents (outside tabs)
+            st.markdown("---")
+            if st.button("🗑️ Clear All Documents", type="secondary", use_container_width=True):
+                # Clean up temporary folders
+                for temp_dir in st.session_state.temp_folders:
+                    if os.path.exists(temp_dir):
+                        try:
+                            shutil.rmtree(temp_dir)
+                        except:
+                            pass
+                
+                # Clear file states
+                st.session_state.file_states = {}
+                st.session_state.temp_folders = []
+                st.session_state.qa_system.clear_documents()               
+                st.success("All documents cleared!")
+                st.rerun()
+            
+            # Document info
+            st.markdown("---")
+            st.subheader("📊 Document Info")
+            if st.session_state.qa_system.loaded_files:
+                enabled_count = len(st.session_state.qa_system.enabled_files)
+                total_count = len(st.session_state.qa_system.loaded_files)
+                st.write(f"**Active files:** {enabled_count}/{total_count}")
+                st.write(f"**Text length:** {len(st.session_state.qa_system.document_text):,} characters")
+                
+                with st.expander("📂 ZIP Contents Overview"):
+                    if st.session_state.qa_system.folder_path:
+                        folder_files = st.session_state.qa_system.get_folder_files_info()
+                        if folder_files:
+                            loaded_count = sum(1 for f in folder_files if f['loaded'])
+                            enabled_count = sum(1 for f in folder_files if f.get('enabled', False))
+                            supported_count = sum(1 for f in folder_files if f['supported'])
+                            total_count = len(folder_files)
+                            
+                            st.write(f"**ZIP Statistics:**")
+                            st.write(f"• Total files: {total_count}")
+                            st.write(f"• Supported formats: {supported_count}")
+                            st.write(f"• Successfully loaded: {loaded_count}")
+                            st.write(f"• Currently enabled: {enabled_count}")
             else:
                 st.info("No documents loaded. Upload files or a ZIP folder to get started.")
-        
-        # Clear documents (outside tabs)
-        st.markdown("---")
-        if st.button("🗑️ Clear All Documents", type="secondary", use_container_width=True):
-            # Clean up temporary folders
-            for temp_dir in st.session_state.temp_folders:
-                if os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir)
-                    except:
-                        pass
             
-            # Clear file states
-            st.session_state.file_states = {}
-            st.session_state.temp_folders = []
-            st.session_state.qa_system.clear_documents()
-            st.session_state.chat_history = []
-            st.success("All documents cleared!")
-            st.rerun()
-        
-        # Document info
-        st.markdown("---")
-        st.subheader("📊 Document Info")
-        if st.session_state.qa_system.loaded_files:
-            enabled_count = len(st.session_state.qa_system.enabled_files)
-            total_count = len(st.session_state.qa_system.loaded_files)
-            st.write(f"**Active files:** {enabled_count}/{total_count}")
-            st.write(f"**Text length:** {len(st.session_state.qa_system.document_text):,} characters")
-            
-            with st.expander("📂 ZIP Contents Overview"):
-                if st.session_state.qa_system.folder_path:
-                    folder_files = st.session_state.qa_system.get_folder_files_info()
-                    if folder_files:
-                        loaded_count = sum(1 for f in folder_files if f['loaded'])
-                        enabled_count = sum(1 for f in folder_files if f.get('enabled', False))
-                        supported_count = sum(1 for f in folder_files if f['supported'])
-                        total_count = len(folder_files)
-                        
-                        st.write(f"**ZIP Statistics:**")
-                        st.write(f"• Total files: {total_count}")
-                        st.write(f"• Supported formats: {supported_count}")
-                        st.write(f"• Successfully loaded: {loaded_count}")
-                        st.write(f"• Currently enabled: {enabled_count}")
-        else:
-            st.info("No documents loaded. Upload files or a ZIP folder to get started.")
-        
-        # API Info
-        st.markdown("---")
-        st.subheader("⚙️ API Status")
-        if st.session_state.qa_system.api_key:
-            st.success("✅ Gemini API Connected")
-        else:
-            st.error("❌ Gemini API Key Missing")
-            st.info("Set GEMINI_API_KEY in your .env file")
-    
-    # Main content area
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
-        
-        # Show active files info
-        if st.session_state.qa_system.enabled_files:
-            enabled_files_list = [os.path.basename(f) for f in st.session_state.qa_system.enabled_files]
-            st.info(f"**Q&A will use:** {', '.join(enabled_files_list[:3])}{'...' if len(enabled_files_list) > 3 else ''}")
-        else:
-            st.warning("⚠️ No files are currently enabled for Q&A. Please enable files from the sidebar.")
-        
-        # Question input
-        question = st.text_area(
-            "Enter your question:",
-            placeholder="What would you like to know about your documents?",
-            height=100
-        )
-        
-        if st.button("Get Answer", type="primary", disabled=not st.session_state.qa_system.enabled_files):
-            if question.strip():
-                # Double-check that we have document text
-                if not st.session_state.qa_system.document_text.strip():
-                    st.error("No document content available. Please make sure files are properly loaded and enabled.")
-                else:
-                    answer = st.session_state.qa_system.generate_answer(question)
-                    
-                    # Add to chat history
-                    st.session_state.chat_history.append({
-                        "question": question,
-                        "answer": answer,
-                        "files": len(st.session_state.qa_system.enabled_files)
-                    })
-                    
-                    # Display answer
-                    st.subheader("🤖 Answer:")
-                    st.write(answer)
+            # API Info
+            st.markdown("---")
+            st.subheader("⚙️ API Status")
+            if st.session_state.qa_system.api_key:
+                st.success("✅ Gemini API Connected")
             else:
-                st.warning("Please enter a question.")
+                st.error("❌ Gemini API Key Missing")
+                st.info("Set GEMINI_API_KEY in your .env file")
     
-    with col2:
-        st.markdown('<h2 class="glow-header">📝 Chat History</h2>', unsafe_allow_html=True)
-        
-        if st.session_state.chat_history:
-            for i, chat in enumerate(reversed(st.session_state.chat_history)):
-                with st.expander(f"Q: {chat['question'][:50]}...", expanded=i==0):
-                    st.write(f"**Question:** {chat['question']}")
-                    st.write(f"**Answer:** {chat['answer']}")
-                    st.caption(f"Based on {chat['files']} documents")
+    # Main content area - only question input now
+    st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
+    
+    # Show active files info
+    if st.session_state.qa_system.enabled_files:
+        enabled_files_list = [os.path.basename(f) for f in st.session_state.qa_system.enabled_files]
+        st.info(f"**Q&A will use:** {', '.join(enabled_files_list[:3])}{'...' if len(enabled_files_list) > 3 else ''}")
+    else:
+        st.warning("⚠️ No files are currently enabled for Q&A. Please enable files from the sidebar.")
+    
+    # Question input
+    question = st.text_area(
+        "Enter your question:",
+        placeholder="What would you like to know about your documents?",
+        height=100
+    )
+    
+    if st.button("Get Answer", type="primary", disabled=not st.session_state.qa_system.enabled_files):
+        if question.strip():
+            # Double-check that we have document text
+            if not st.session_state.qa_system.document_text.strip():
+                st.error("No document content available. Please make sure files are properly loaded and enabled.")
+            else:
+                answer = st.session_state.qa_system.generate_answer(question)
+                
+                # Add to chat history
+                st.session_state.chat_history.append({
+                    "question": question,
+                    "answer": answer,
+                    "files": len(st.session_state.qa_system.enabled_files)
+                })
+                save_chat_history()
+                # Display answer
+                st.subheader("🤖 Answer:")
+                st.write(answer)
         else:
-            st.info("No questions asked yet. Upload documents and ask questions to see history here.")
+            st.warning("Please enter a question.")
     
     # Quick stats at bottom
     st.markdown("---")
@@ -759,21 +1111,9 @@ def main():
     with col4:
         folders_count = len(st.session_state.temp_folders)
         st.metric("Uploaded ZIPs", folders_count)
+        
 
-# Cleanup function
-def cleanup_temp_folders():
-    """Clean up temporary folders when the app closes"""
-    if 'temp_folders' in st.session_state:
-        for temp_dir in st.session_state.temp_folders:
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
 
-# Register cleanup
-import atexit
-atexit.register(cleanup_temp_folders)
 
 if __name__ == "__main__":
     main()
