@@ -34,10 +34,12 @@ class UserManager:
     def __init__(self):
         self.users_file = "users.json"
         self.chat_history_dir = "chat_histories"
+        self.file_states_dir = "file_states"  # New directory for file states
         self.load_users()
         
-        # Create chat history directory if it doesn't exist
+        # Create directories if they don't exist
         os.makedirs(self.chat_history_dir, exist_ok=True)
+        os.makedirs(self.file_states_dir, exist_ok=True)
     
     def load_users(self):
         """Load users from JSON file"""
@@ -149,6 +151,50 @@ class UserManager:
             print(f"Error clearing chat history for {username}: {e}")
             return False
 
+    def get_user_file_states_file(self, username):
+        """Get the file states file path for a user"""
+        safe_username = "".join(c for c in username if c.isalnum() or c in ('-', '_')).rstrip()
+        return os.path.join(self.file_states_dir, f"{safe_username}_files.json")
+    
+    def save_user_file_states(self, username, file_states):
+        """Save file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            with open(states_file, 'w', encoding='utf-8') as f:
+                json.dump(file_states, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving file states for {username}: {e}")
+            return False
+    
+    def load_user_file_states(self, username):
+        """Load file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            if os.path.exists(states_file):
+                with open(states_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading file states for {username}: {e}")
+        return {
+            'loaded_files': [],
+            'enabled_files': [],
+            'file_contents': {},
+            'folder_path': None,
+            'temp_folders': []
+        }
+    
+    def clear_user_file_states(self, username):
+        """Clear file states for a specific user"""
+        try:
+            states_file = self.get_user_file_states_file(username)
+            if os.path.exists(states_file):
+                os.remove(states_file)
+            return True
+        except Exception as e:
+            print(f"Error clearing file states for {username}: {e}")
+            return False
+
 def save_chat_history():
     """Save chat history for current user"""
     try:
@@ -190,6 +236,44 @@ def cleanup_temp_folders():
                 except:
                     pass
 
+def save_file_states():
+    """Save file states for current user"""
+    try:
+        if st.session_state.current_user and st.session_state.qa_system:
+            file_states = {
+                'loaded_files': st.session_state.qa_system.loaded_files,
+                'enabled_files': st.session_state.qa_system.enabled_files,
+                'file_contents': st.session_state.qa_system.file_contents,
+                'folder_path': st.session_state.qa_system.folder_path,
+                'temp_folders': st.session_state.temp_folders
+            }
+            success = st.session_state.user_manager.save_user_file_states(
+                st.session_state.current_user, 
+                file_states
+            )
+            if not success:
+                print("Failed to save file states")
+        else:
+            print("No user logged in - cannot save file states")
+    except Exception as e:
+        print(f"Error saving file states: {e}")
+
+def load_file_states():
+    """Load file states for current user"""
+    try:
+        if st.session_state.current_user:
+            file_states = st.session_state.user_manager.load_user_file_states(
+                st.session_state.current_user
+            )
+            print(f"Loaded file states for {st.session_state.current_user}")
+            return file_states
+        else:
+            print("No user logged in - cannot load file states")
+            return None
+    except Exception as e:
+        print(f"Error loading file states: {e}")
+        return None
+
 # Register cleanup
 atexit.register(cleanup_temp_folders)
 
@@ -207,9 +291,14 @@ class GeminiDocumentQA:
         self.enabled_files = []  # Files currently enabled for Q&A
         self.file_contents = {}  # Store file contents separately
         self.folder_path = None
+        
+        # Improved size limits for better performance
+        self.max_file_size = 300000  # Reduced to 300K for better performance
+        self.max_total_context = 800000  # Maximum total context for Q&A
+        self.chunk_size = 15000  # Smaller chunks for better processing
     
     def load_document(self, file_path):
-        """Load a single document from various formats"""
+        """Load a single document from various formats with automatic splitting for large files"""
         file_extension = file_path.lower().split('.')[-1]
         
         try:
@@ -222,18 +311,101 @@ class GeminiDocumentQA:
             else:
                 raise ValueError(f"Unsupported file format: {file_extension}")
             
-            # Store file content separately
-            self.file_contents[file_path] = text
-            self.loaded_files.append(file_path)
-            self.enabled_files.append(file_path)  # Enable by default
-            
-            # REBUILD DOCUMENT TEXT IMMEDIATELY AFTER ADDING FILE
-            self._rebuild_document_text()
-            
-            return True, f"Document '{os.path.basename(file_path)}' loaded successfully!"
+            # Check if file is too large and needs splitting
+            if len(text) > self.max_file_size:
+                st.warning(f"📁 Large document detected! Splitting '{os.path.basename(file_path)}' into manageable chunks...")
+                return self._split_and_load_large_document(file_path, text, file_extension)
+            else:
+                # Store file content normally
+                self.file_contents[file_path] = text
+                self.loaded_files.append(file_path)
+                self.enabled_files.append(file_path)
+                self._rebuild_document_text()
+                return True, f"Document '{os.path.basename(file_path)}' loaded successfully!"
             
         except Exception as e:
             return False, f"Error loading document: {str(e)}"
+    
+    def _split_and_load_large_document(self, file_path, full_text, file_extension):
+        """Split a large document into smaller chunks and load them as separate virtual files"""
+        try:
+            # Split the text into chunks
+            chunks = self._split_text_into_chunks(full_text)
+            
+            # Create virtual files for each chunk
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            successful_chunks = 0
+            
+            for i, chunk in enumerate(chunks):
+                virtual_file_path = f"{file_path}_chunk_{i+1:03d}"
+                chunk_name = f"{base_name}_part_{i+1:03d}.{file_extension}"
+                
+                # Store chunk content
+                self.file_contents[virtual_file_path] = chunk
+                self.loaded_files.append(virtual_file_path)
+                self.enabled_files.append(virtual_file_path)
+                successful_chunks += 1
+            
+            # Rebuild document text
+            self._rebuild_document_text()
+            
+            return True, f"Large document split into {successful_chunks} chunks and loaded successfully!"
+            
+        except Exception as e:
+            return False, f"Error splitting large document: {str(e)}"
+    
+    def _split_text_into_chunks(self, text, chunk_size=None):
+        """Split text into chunks with intelligent boundaries"""
+        if chunk_size is None:
+            chunk_size = self.max_file_size
+        
+        chunks = []
+        start = 0
+        text_length = len(text)
+        
+        while start < text_length:
+            # Calculate end position
+            end = start + chunk_size
+            
+            if end >= text_length:
+                # Last chunk
+                chunks.append(text[start:])
+                break
+            
+            # Try to find a good breaking point
+            # Look for paragraph breaks first
+            paragraph_break = text.rfind('\n\n', start, end)
+            if paragraph_break != -1 and paragraph_break > start:
+                end = paragraph_break + 2
+            else:
+                # Look for sentence breaks
+                sentence_break = text.rfind('. ', start, end)
+                if sentence_break != -1 and sentence_break > start:
+                    end = sentence_break + 2
+                else:
+                    # Look for line breaks
+                    line_break = text.rfind('\n', start, end)
+                    if line_break != -1 and line_break > start:
+                        end = line_break + 1
+                    else:
+                        # Just split at the chunk size
+                        end = start + chunk_size
+            
+            chunks.append(text[start:end])
+            start = end
+        
+        return chunks
+    
+    def get_file_display_name(self, file_path):
+        """Get display name for files (handles both real and virtual split files)"""
+        basename = os.path.basename(file_path)
+        if '_chunk_' in file_path:
+            # This is a split file - format the name nicely
+            base_parts = os.path.splitext(basename.split('_chunk_')[0])[0]
+            chunk_num = basename.split('_chunk_')[1]
+            return f"📄 {base_parts} [Part {chunk_num}]"
+        else:
+            return f"📄 {basename}"
     
     def toggle_file(self, file_path, enabled):
         """Enable or disable a file for Q&A"""
@@ -244,6 +416,9 @@ class GeminiDocumentQA:
         
         # Rebuild document text from enabled files
         self._rebuild_document_text()
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
     
     def _rebuild_document_text(self):
         """Rebuild the combined document text from enabled files"""
@@ -359,50 +534,310 @@ class GeminiDocumentQA:
         self.enabled_files = []
         self.file_contents = {}
         self.folder_path = None
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
     
     def remove_file(self, file_path):
-        """Completely remove a file from the system"""
-        if file_path in self.loaded_files:
-            self.loaded_files.remove(file_path)
-        if file_path in self.enabled_files:
-            self.enabled_files.remove(file_path)
-        if file_path in self.file_contents:
-            del self.file_contents[file_path]
+        """Completely remove a file from the system - updated to handle split files"""
+        # If removing a split file, remove all chunks from the same original file
+        files_to_remove = []
+        
+        if '_chunk_' in file_path:
+            # This is a split file - find all chunks from the same original
+            original_base = file_path.split('_chunk_')[0]
+            for loaded_file in self.loaded_files:
+                if loaded_file.startswith(original_base + '_chunk_'):
+                    files_to_remove.append(loaded_file)
+        else:
+            files_to_remove = [file_path]
+        
+        # Remove all identified files
+        for file_to_remove in files_to_remove:
+            if file_to_remove in self.loaded_files:
+                self.loaded_files.remove(file_to_remove)
+            if file_to_remove in self.enabled_files:
+                self.enabled_files.remove(file_to_remove)
+            if file_to_remove in self.file_contents:
+                del self.file_contents[file_to_remove]
+        
         self._rebuild_document_text()
-    
+        # Auto-save file states
+        if 'current_user' in st.session_state and st.session_state.current_user:
+            save_file_states()
+
     def generate_answer(self, question):
-        """Generate answer using all enabled documents"""
+        """Generate answer using all enabled documents with smart context management"""
         if not self.document_text:
             return "No documents loaded. Please upload documents first."
         
-        if len(self.document_text) > 1000000:
-            st.warning("Very large document collection. This might take a while...")
+        # Check if we're dealing with very large content
+        total_text_length = len(self.document_text)
         
-        prompt = f"""
-        Based EXCLUSIVELY on the following document content, answer the question below.
-
-        DOCUMENT CONTENT:
-        {self.document_text}
-
-        QUESTION: {question}
-
-        Instructions:
-        - Answer using ONLY information from the documents
-        - Be comprehensive and accurate
-        - If the answer cannot be found in the documents, say "The documents do not contain information about this"
-        - Provide specific details and quotes when possible
-        - Consider all document content in your answer
-        - If multiple documents contain relevant information, synthesize the information
-        """
+        if total_text_length > self.max_total_context:
+            st.warning("💡 Very large document collection detected. Using smart search to find relevant sections...")
+            return self._smart_context_answering(question)
+        elif total_text_length > 300000:
+            st.info("🔍 Large documents detected. Optimizing search for better answers...")
+            return self._optimized_large_document_answering(question)
+        else:
+            return self._standard_answering(question)
+    
+    def _standard_answering(self, question):
+        """Standard answering for smaller documents"""
+        prompt = self._build_focused_prompt(question, self.document_text)
         
         try:
-            with st.spinner("Generating answer..."):
+            with st.spinner("Analyzing documents..."):
                 response = self.model.generate_content(prompt)
                 return response.text
         except Exception as e:
             if "context length" in str(e).lower() or "too long" in str(e).lower():
                 return self._handle_large_document(question)
             return f"Error generating answer: {str(e)}"
+    
+    def _optimized_large_document_answering(self, question):
+        """Optimized answering for large documents"""
+        # Split into smaller, more focused chunks
+        chunks = self._split_document_optimized(self.document_text)
+        
+        # First pass: Find most relevant chunks
+        relevant_chunks = self._find_relevant_chunks(question, chunks)
+        
+        if not relevant_chunks:
+            return "No relevant information found in the documents for your question."
+        
+        # Combine relevant chunks
+        focused_context = "\n\n".join(relevant_chunks[:3])  # Use top 3 most relevant chunks
+        
+        prompt = self._build_focused_prompt(question, focused_context)
+        
+        try:
+            with st.spinner("Analyzing most relevant sections..."):
+                response = self.model.generate_content(prompt)
+                return response.text
+        except Exception as e:
+            return f"Error generating answer: {str(e)}"
+    
+    def _smart_context_answering(self, question):
+        """Smart answering for very large document collections"""
+        # Extract key sections and find most relevant ones
+        sections = self._extract_document_sections()
+        
+        # Find most relevant sections to the question
+        relevant_sections = self._find_relevant_sections(question, sections)
+        
+        if not relevant_sections:
+            return "The documents don't contain specific information about this topic. Try asking a more general question or check if you've enabled the right documents."
+        
+        # Build focused context from relevant sections
+        focused_context = self._build_focused_context(relevant_sections)
+        
+        prompt = self._build_focused_prompt(question, focused_context)
+        
+        try:
+            with st.spinner("Searching through documents for relevant information..."):
+                response = self.model.generate_content(prompt)
+                return response.text
+        except Exception as e:
+            return f"Error generating answer: {str(e)}"
+    
+    def _build_focused_prompt(self, question, context):
+        """Build a more focused and effective prompt"""
+        return f"""
+        Please analyze the following document content and provide a comprehensive answer to the question.
+
+        QUESTION: {question}
+
+        DOCUMENT CONTENT:
+        {context}
+
+        IMPORTANT INSTRUCTIONS:
+        1. Focus specifically on information directly relevant to the question
+        2. Provide detailed, specific answers with quotes or references to the source material when possible
+        3. If the documents contain the information, be thorough and comprehensive
+        4. If information is spread across multiple sections, synthesize it into a coherent answer
+        5. If the documents don't contain the specific information, clearly state what aspects are covered and what's missing
+        6. Provide page numbers, section names, or document references if available in the content
+
+        Please structure your answer to be:
+        - Direct and specific to the question
+        - Well-organized with clear sections if appropriate
+        - Supported by evidence from the documents
+        - Comprehensive but focused on what's actually in the documents
+        """
+    
+    def _split_document_optimized(self, text, chunk_size=None):
+        """Split document into optimized chunks for better processing"""
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+        
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = start + chunk_size
+            
+            if end >= len(text):
+                chunks.append(text[start:])
+                break
+            
+            # Find optimal break points
+            optimal_break = self._find_optimal_break(text, start, end)
+            end = optimal_break
+            
+            chunk = text[start:end]
+            if len(chunk.strip()) > 1000:  # Only add substantial chunks
+                chunks.append(chunk)
+            
+            start = end
+        
+        return chunks
+    
+    def _find_optimal_break(self, text, start, end):
+        """Find the best place to break text for context preservation"""
+        # Priority: Document boundaries
+        doc_separator = text.rfind('--- Document:', start, end)
+        if doc_separator != -1 and doc_separator > start + 1000:
+            return doc_separator
+        
+        # Then paragraph breaks
+        paragraph_break = text.rfind('\n\n', start, end)
+        if paragraph_break != -1 and paragraph_break > start + 1000:
+            return paragraph_break + 2
+        
+        # Then section breaks
+        section_breaks = ['\n# ', '\n## ', '\n### ', '\n• ', '\n- ']
+        for break_char in section_breaks:
+            section_break = text.rfind(break_char, start, end)
+            if section_break != -1 and section_break > start + 1000:
+                return section_break
+        
+        # Fallback: sentence break
+        sentence_break = text.rfind('. ', start, end)
+        if sentence_break != -1 and sentence_break > start + 1000:
+            return sentence_break + 2
+        
+        return end
+    
+    def _find_relevant_chunks(self, question, chunks):
+        """Find chunks most relevant to the question using keyword matching"""
+        question_lower = question.lower()
+        relevant_keywords = self._extract_keywords(question)
+        
+        scored_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            score = 0
+            chunk_lower = chunk.lower()
+            
+            # Score based on keyword matches
+            for keyword in relevant_keywords:
+                if keyword in chunk_lower:
+                    score += chunk_lower.count(keyword) * 2
+            
+            # Bonus for question words in chunk
+            question_words = set(question_lower.split())
+            chunk_words = set(chunk_lower.split())
+            common_words = question_words.intersection(chunk_words)
+            score += len(common_words)
+            
+            if score > 0:
+                scored_chunks.append((score, chunk))
+        
+        # Return top chunks by relevance score
+        scored_chunks.sort(reverse=True, key=lambda x: x[0])
+        return [chunk for score, chunk in scored_chunks[:5]]  # Top 5 chunks
+    
+    def _extract_keywords(self, question):
+        """Extract important keywords from the question"""
+        stop_words = {'what', 'how', 'why', 'when', 'where', 'who', 'which', 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'do', 'does', 'did'}
+        words = question.lower().split()
+        return [word for word in words if word not in stop_words and len(word) > 2]
+    
+    def _extract_document_sections(self):
+        """Extract logical sections from the document text"""
+        sections = []
+        
+        # Split by document boundaries
+        doc_parts = self.document_text.split('--- Document:')
+        
+        for doc_part in doc_parts[1:]:  # Skip first empty part
+            if '---\n\n' in doc_part:
+                doc_name, content = doc_part.split('---\n\n', 1)
+                doc_name = doc_name.strip()
+                
+                # Further split content by major sections
+                content_sections = self._split_into_sections(content)
+                for section_content in content_sections:
+                    if len(section_content.strip()) > 500:  # Only substantial sections
+                        sections.append({
+                            'document': doc_name,
+                            'content': section_content
+                        })
+        
+        return sections
+    
+    def _split_into_sections(self, content):
+        """Split content into logical sections"""
+        sections = []
+        
+        # Try to split by headings or major breaks
+        split_points = [
+            '\n# ', '\n## ', '\n### ', '\n#### ',
+            '\n• ', '\n- ', '\n* ', '\n1. ', '\n2. ', '\n3. ',
+            '\n\n\n', '\nSECTION', '\nCHAPTER'
+        ]
+        
+        current_section = content
+        for split_point in split_points:
+            if split_point in current_section:
+                parts = current_section.split(split_point)
+                sections.extend(parts)
+                break
+        else:
+            # If no clear splits, use paragraphs
+            paragraphs = [p for p in content.split('\n\n') if len(p.strip()) > 200]
+            sections.extend(paragraphs)
+        
+        return sections
+    
+    def _find_relevant_sections(self, question, sections):
+        """Find sections most relevant to the question"""
+        question_lower = question.lower()
+        keywords = self._extract_keywords(question)
+        
+        scored_sections = []
+        
+        for section in sections:
+            score = 0
+            content_lower = section['content'].lower()
+            
+            # Keyword matching
+            for keyword in keywords:
+                if keyword in content_lower:
+                    score += content_lower.count(keyword) * 3
+            
+            # Question word matching
+            question_words = set(question_lower.split())
+            content_words = set(content_lower.split())
+            common_words = question_words.intersection(content_words)
+            score += len(common_words)
+            
+            if score > 0:
+                scored_sections.append((score, section))
+        
+        scored_sections.sort(reverse=True, key=lambda x: x[0])
+        return [section for score, section in scored_sections[:8]]  # Top 8 sections
+    
+    def _build_focused_context(self, relevant_sections):
+        """Build focused context from relevant sections"""
+        context_parts = []
+        
+        for section in relevant_sections[:5]:  # Use top 5 most relevant sections
+            context_parts.append(f"--- From: {section['document']} ---\n{section['content']}")
+        
+        return "\n\n".join(context_parts)
     
     def _handle_large_document(self, question):
         """Handle documents that are too large by using smart chunking"""
@@ -413,7 +848,7 @@ class GeminiDocumentQA:
         status_text = st.empty()
         
         for i, chunk in enumerate(chunks):
-            status_text.text(f"Processing chunk {i+1}/{len(chunks)}...")
+            status_text.text(f"Searching section {i+1}/{len(chunks)}...")
             progress_bar.progress((i + 1) / len(chunks))
             
             chunk_prompt = f"""
@@ -513,8 +948,9 @@ def main():
     if 'show_register' not in st.session_state:
         st.session_state.show_register = False
     
+    # Initialize qa_system as EMPTY - we'll create it fresh for each user
     if 'qa_system' not in st.session_state:
-        st.session_state.qa_system = GeminiDocumentQA()
+        st.session_state.qa_system = None
     
     if 'temp_folders' not in st.session_state:
         st.session_state.temp_folders = []
@@ -534,14 +970,40 @@ def main():
         show_auth_screen()
         return
     
-    # ONLY AFTER LOGIN: Load the user's specific chat history
+    # ONLY AFTER LOGIN: Initialize qa_system and load user's specific data
     if st.session_state.logged_in and st.session_state.current_user:
+        # Create fresh qa_system for this user if it doesn't exist
+        if st.session_state.qa_system is None:
+            try:
+                st.session_state.qa_system = GeminiDocumentQA()
+                print(f"Created fresh qa_system for user: {st.session_state.current_user}")
+                
+                # Load file states for this user
+                file_states = load_file_states()
+                if file_states:
+                    # Restore the file states
+                    st.session_state.qa_system.loaded_files = file_states['loaded_files']
+                    st.session_state.qa_system.enabled_files = file_states['enabled_files']
+                    st.session_state.qa_system.file_contents = file_states['file_contents']
+                    st.session_state.qa_system.folder_path = file_states['folder_path']
+                    st.session_state.temp_folders = file_states['temp_folders']
+                    
+                    # Rebuild document text from enabled files
+                    st.session_state.qa_system._rebuild_document_text()
+                    print(f"Restored {len(st.session_state.qa_system.loaded_files)} files for user {st.session_state.current_user}")
+                
+            except Exception as e:
+                st.error(f"Failed to initialize Gemini API: {e}")
+                return
+        
         # Load chat history for the current user
         if not st.session_state.chat_history:  # Only load if empty
             st.session_state.chat_history = load_chat_history()
+            print(f"Loaded {len(st.session_state.chat_history)} chat history entries for {st.session_state.current_user}")
     
     # If logged in, show the main app
     show_main_application()
+    
 def show_auth_screen():
     """Show login or registration screen"""
     st.markdown("""
@@ -666,14 +1128,31 @@ def show_main_application():
     with st.sidebar:
         st.success(f"👤 Signed in as: **{st.session_state.current_user}**")
         if st.button("🚪 Logout", use_container_width=True):
-            # Save chat history before logging out
+            # Save chat history and file states before logging out
             save_chat_history()
+            save_file_states()
+            
+            # Reset all user-specific session state
             st.session_state.logged_in = False
             st.session_state.current_user = None
-            st.session_state.chat_history = []  # Clear chat history on logout
+            st.session_state.qa_system = None  # Reset qa_system
+            st.session_state.chat_history = []  # Clear chat history
+            st.session_state.temp_folders = []  # Clear temp folders
+            st.session_state.file_states = {}  # Clear file states
+            st.session_state.show_history = False
+            
             st.rerun()
         st.markdown("---")
-    
+        
+        # Safety check - ensure qa_system is initialized
+        if st.session_state.qa_system is None:
+            st.error("Document system not properly initialized. Please log out and log in again.")
+            if st.button("🔄 Restart Application"):
+                st.session_state.logged_in = False
+                st.session_state.current_user = None
+                st.session_state.qa_system = None
+                st.rerun()
+            return
     
     # Custom CSS with glowy effects (your existing CSS)
     st.markdown("""
@@ -785,10 +1264,6 @@ def show_main_application():
     # Display the main header ONLY ONCE
     st.markdown('<h1 class="main-header">📚 G.E.E.T.A</h1>', unsafe_allow_html=True)
     
-    # Initialize session state for the main app
-  
-    
-    
     # Sidebar with tabs
     with st.sidebar:
         # History button at the top
@@ -844,15 +1319,33 @@ def show_main_application():
                 if st.button("Upload Selected Files", type="primary", key="upload_files"):
                     if uploaded_files:
                         success_count = 0
-                        for uploaded_file in uploaded_files:
+                        split_count = 0
+                        
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        for i, uploaded_file in enumerate(uploaded_files):
+                            status_text.text(f"Processing {uploaded_file.name}...")
+                            progress_bar.progress((i) / len(uploaded_files))
+                            
                             success, message = st.session_state.qa_system.load_uploaded_file(uploaded_file)
                             if success:
                                 st.success(f"✅ {message}")
                                 success_count += 1
+                                if "split" in message.lower():
+                                    split_count += 1
                             else:
                                 st.error(f"❌ {message}")
+                        
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         if success_count > 0:
-                            st.success(f"🎉 Successfully loaded {success_count} files!")
+                            save_file_states()
+                            summary_msg = f"🎉 Successfully loaded {success_count} files!"
+                            if split_count > 0:
+                                summary_msg += f" ({split_count} were split into chunks)"
+                            st.success(summary_msg)
                             st.rerun()
                     else:
                         st.warning("Please select files to upload.")
@@ -912,6 +1405,7 @@ def show_main_application():
                                 success, message = st.session_state.qa_system.load_folder_contents(temp_dir)
                                 
                                 if success:
+                                    save_file_states()  # Save after loading ZIP
                                     st.success(f"✅ {message}")
                                     st.info(f"📁 Extracted to temporary folder: {os.path.basename(temp_dir)}")
                                     st.rerun()
@@ -978,12 +1472,15 @@ def show_main_application():
                                 # Create a unique key for each file button
                                 file_button_key = f"file_toggle_{file_path}"
                                 
+                                # Get display name (handles split files)
+                                display_name = st.session_state.qa_system.get_file_display_name(file_path)
+                                
                                 # Determine button label and style based on enabled state
                                 if current_enabled:
-                                    button_label = f"✅ {os.path.basename(file_path)}"
+                                    button_label = f"✅ {display_name}"
                                     button_type = "primary"
                                 else:
-                                    button_label = f"❌ {os.path.basename(file_path)}"
+                                    button_label = f"❌ {display_name}"
                                     button_type = "secondary"
                                 
                                 # Clickable file button to toggle selection
@@ -1000,7 +1497,8 @@ def show_main_application():
                         # Remove files after iteration
                         for file_path in files_to_remove:
                             st.session_state.qa_system.remove_file(file_path)
-                            st.success(f"Removed: {os.path.basename(file_path)}")
+                            display_name = st.session_state.qa_system.get_file_display_name(file_path)
+                            st.success(f"Removed: {display_name}")
                             st.rerun()
                 else:
                     st.info("No documents loaded. Upload files or a ZIP folder to get started.")
@@ -1032,6 +1530,31 @@ def show_main_application():
                 st.write(f"**Active files:** {enabled_count}/{total_count}")
                 st.write(f"**Text length:** {len(st.session_state.qa_system.document_text):,} characters")
                 
+                with st.expander("📂 File Details"):
+                    # Count regular vs split files
+                    regular_files = []
+                    split_files = {}
+                    
+                    for file_path in st.session_state.qa_system.loaded_files:
+                        if '_chunk_' in file_path:
+                            # This is a split file
+                            base_name = file_path.split('_chunk_')[0]
+                            if base_name not in split_files:
+                                split_files[base_name] = []
+                            split_files[base_name].append(file_path)
+                        else:
+                            regular_files.append(file_path)
+                    
+                    st.write(f"**Regular files:** {len(regular_files)}")
+                    st.write(f"**Split documents:** {len(split_files)}")
+                    
+                    if split_files:
+                        st.write("**Split documents details:**")
+                        for base_name, chunks in split_files.items():
+                            display_name = st.session_state.qa_system.get_file_display_name(base_name + "_chunk_001")
+                            base_display = display_name.split(' [Part')[0]  # Remove part number
+                            st.write(f"• {base_display}: {len(chunks)} parts")
+                
                 with st.expander("📂 ZIP Contents Overview"):
                     if st.session_state.qa_system.folder_path:
                         folder_files = st.session_state.qa_system.get_folder_files_info()
@@ -1057,13 +1580,63 @@ def show_main_application():
             else:
                 st.error("❌ Gemini API Key Missing")
                 st.info("Set GEMINI_API_KEY in your .env file")
+            
+            # Add settings section
+            st.markdown("---")
+            st.subheader("⚙️ Document Settings")
+            
+            with st.expander("Large Document Handling"):
+                st.info("""
+                **Performance Optimization:**
+                - Smaller chunk sizes improve answer quality but may take longer
+                - Very large documents are automatically processed with smart search
+                - The system prioritizes relevant sections for better answers
+                """)
+                
+                # Configurable size limits
+                max_size = st.slider(
+                    "Max file size before splitting (characters)",
+                    min_value=100000,
+                    max_value=500000,
+                    value=300000,  # Reduced default
+                    step=50000,
+                    help="Smaller values improve answer quality but increase processing time"
+                )
+                
+                chunk_size = st.slider(
+                    "Processing chunk size",
+                    min_value=5000,
+                    max_value=30000,
+                    value=15000,
+                    step=1000,
+                    help="Smaller chunks = better precision, Larger chunks = faster processing"
+                )
+                
+                if st.button("Apply Settings", use_container_width=True):
+                    st.session_state.qa_system.max_file_size = max_size
+                    st.session_state.qa_system.chunk_size = chunk_size
+                    st.success("Settings updated!")
     
     # Main content area - only question input now
     st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
     
+    # Tips for better answers with large documents
+    with st.expander("💡 Tips for Better Answers with Large Documents"):
+        st.markdown("""
+        **For better results with large documents:**
+        
+        • **Be specific** - Ask precise questions rather than general ones
+        • **Enable only relevant files** - Disable documents that aren't related to your question
+        • **Use keywords** - Include specific terms from the documents in your questions
+        • **Break down complex questions** - Ask multiple focused questions instead of one broad question
+        • **Reference specific sections** - If you know where the information might be, mention it
+        
+        *The system automatically optimizes search for large documents to provide the most relevant answers.*
+        """)
+    
     # Show active files info
     if st.session_state.qa_system.enabled_files:
-        enabled_files_list = [os.path.basename(f) for f in st.session_state.qa_system.enabled_files]
+        enabled_files_list = [st.session_state.qa_system.get_file_display_name(f) for f in st.session_state.qa_system.enabled_files]
         st.info(f"**Q&A will use:** {', '.join(enabled_files_list[:3])}{'...' if len(enabled_files_list) > 3 else ''}")
     else:
         st.warning("⚠️ No files are currently enabled for Q&A. Please enable files from the sidebar.")
@@ -1112,8 +1685,6 @@ def show_main_application():
     with col4:
         folders_count = len(st.session_state.temp_folders)
         st.metric("Uploaded ZIPs", folders_count)
-        
-
 
 #run 
 if __name__ == "__main__":
