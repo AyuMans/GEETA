@@ -292,9 +292,10 @@ class GeminiDocumentQA:
         self.file_contents = {}  # Store file contents separately
         self.folder_path = None
         
-        # New: Size limits for automatic splitting (in characters)
-        self.max_file_size = 500000  # ~500K characters per file
-        self.max_chunk_size = 10000  # For processing large documents
+        # Improved size limits for better performance
+        self.max_file_size = 300000  # Reduced to 300K for better performance
+        self.max_total_context = 800000  # Maximum total context for Q&A
+        self.chunk_size = 15000  # Smaller chunks for better processing
     
     def load_document(self, file_path):
         """Load a single document from various formats with automatic splitting for large files"""
@@ -564,40 +565,279 @@ class GeminiDocumentQA:
         # Auto-save file states
         if 'current_user' in st.session_state and st.session_state.current_user:
             save_file_states()
-    
+
     def generate_answer(self, question):
-        """Generate answer using all enabled documents"""
+        """Generate answer using all enabled documents with smart context management"""
         if not self.document_text:
             return "No documents loaded. Please upload documents first."
         
-        if len(self.document_text) > 1000000:
-            st.warning("Very large document collection. This might take a while...")
+        # Check if we're dealing with very large content
+        total_text_length = len(self.document_text)
         
-        prompt = f"""
-        Based EXCLUSIVELY on the following document content, answer the question below.
-
-        DOCUMENT CONTENT:
-        {self.document_text}
-
-        QUESTION: {question}
-
-        Instructions:
-        - Answer using ONLY information from the documents
-        - Be comprehensive and accurate
-        - If the answer cannot be found in the documents, say "The documents do not contain information about this"
-        - Provide specific details and quotes when possible
-        - Consider all document content in your answer
-        - If multiple documents contain relevant information, synthesize the information
-        """
+        if total_text_length > self.max_total_context:
+            st.warning("💡 Very large document collection detected. Using smart search to find relevant sections...")
+            return self._smart_context_answering(question)
+        elif total_text_length > 300000:
+            st.info("🔍 Large documents detected. Optimizing search for better answers...")
+            return self._optimized_large_document_answering(question)
+        else:
+            return self._standard_answering(question)
+    
+    def _standard_answering(self, question):
+        """Standard answering for smaller documents"""
+        prompt = self._build_focused_prompt(question, self.document_text)
         
         try:
-            with st.spinner("Generating answer..."):
+            with st.spinner("Analyzing documents..."):
                 response = self.model.generate_content(prompt)
                 return response.text
         except Exception as e:
             if "context length" in str(e).lower() or "too long" in str(e).lower():
                 return self._handle_large_document(question)
             return f"Error generating answer: {str(e)}"
+    
+    def _optimized_large_document_answering(self, question):
+        """Optimized answering for large documents"""
+        # Split into smaller, more focused chunks
+        chunks = self._split_document_optimized(self.document_text)
+        
+        # First pass: Find most relevant chunks
+        relevant_chunks = self._find_relevant_chunks(question, chunks)
+        
+        if not relevant_chunks:
+            return "No relevant information found in the documents for your question."
+        
+        # Combine relevant chunks
+        focused_context = "\n\n".join(relevant_chunks[:3])  # Use top 3 most relevant chunks
+        
+        prompt = self._build_focused_prompt(question, focused_context)
+        
+        try:
+            with st.spinner("Analyzing most relevant sections..."):
+                response = self.model.generate_content(prompt)
+                return response.text
+        except Exception as e:
+            return f"Error generating answer: {str(e)}"
+    
+    def _smart_context_answering(self, question):
+        """Smart answering for very large document collections"""
+        # Extract key sections and find most relevant ones
+        sections = self._extract_document_sections()
+        
+        # Find most relevant sections to the question
+        relevant_sections = self._find_relevant_sections(question, sections)
+        
+        if not relevant_sections:
+            return "The documents don't contain specific information about this topic. Try asking a more general question or check if you've enabled the right documents."
+        
+        # Build focused context from relevant sections
+        focused_context = self._build_focused_context(relevant_sections)
+        
+        prompt = self._build_focused_prompt(question, focused_context)
+        
+        try:
+            with st.spinner("Searching through documents for relevant information..."):
+                response = self.model.generate_content(prompt)
+                return response.text
+        except Exception as e:
+            return f"Error generating answer: {str(e)}"
+    
+    def _build_focused_prompt(self, question, context):
+        """Build a more focused and effective prompt"""
+        return f"""
+        Please analyze the following document content and provide a comprehensive answer to the question.
+
+        QUESTION: {question}
+
+        DOCUMENT CONTENT:
+        {context}
+
+        IMPORTANT INSTRUCTIONS:
+        1. Focus specifically on information directly relevant to the question
+        2. Provide detailed, specific answers with quotes or references to the source material when possible
+        3. If the documents contain the information, be thorough and comprehensive
+        4. If information is spread across multiple sections, synthesize it into a coherent answer
+        5. If the documents don't contain the specific information, clearly state what aspects are covered and what's missing
+        6. Provide page numbers, section names, or document references if available in the content
+
+        Please structure your answer to be:
+        - Direct and specific to the question
+        - Well-organized with clear sections if appropriate
+        - Supported by evidence from the documents
+        - Comprehensive but focused on what's actually in the documents
+        """
+    
+    def _split_document_optimized(self, text, chunk_size=None):
+        """Split document into optimized chunks for better processing"""
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+        
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = start + chunk_size
+            
+            if end >= len(text):
+                chunks.append(text[start:])
+                break
+            
+            # Find optimal break points
+            optimal_break = self._find_optimal_break(text, start, end)
+            end = optimal_break
+            
+            chunk = text[start:end]
+            if len(chunk.strip()) > 1000:  # Only add substantial chunks
+                chunks.append(chunk)
+            
+            start = end
+        
+        return chunks
+    
+    def _find_optimal_break(self, text, start, end):
+        """Find the best place to break text for context preservation"""
+        # Priority: Document boundaries
+        doc_separator = text.rfind('--- Document:', start, end)
+        if doc_separator != -1 and doc_separator > start + 1000:
+            return doc_separator
+        
+        # Then paragraph breaks
+        paragraph_break = text.rfind('\n\n', start, end)
+        if paragraph_break != -1 and paragraph_break > start + 1000:
+            return paragraph_break + 2
+        
+        # Then section breaks
+        section_breaks = ['\n# ', '\n## ', '\n### ', '\n• ', '\n- ']
+        for break_char in section_breaks:
+            section_break = text.rfind(break_char, start, end)
+            if section_break != -1 and section_break > start + 1000:
+                return section_break
+        
+        # Fallback: sentence break
+        sentence_break = text.rfind('. ', start, end)
+        if sentence_break != -1 and sentence_break > start + 1000:
+            return sentence_break + 2
+        
+        return end
+    
+    def _find_relevant_chunks(self, question, chunks):
+        """Find chunks most relevant to the question using keyword matching"""
+        question_lower = question.lower()
+        relevant_keywords = self._extract_keywords(question)
+        
+        scored_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            score = 0
+            chunk_lower = chunk.lower()
+            
+            # Score based on keyword matches
+            for keyword in relevant_keywords:
+                if keyword in chunk_lower:
+                    score += chunk_lower.count(keyword) * 2
+            
+            # Bonus for question words in chunk
+            question_words = set(question_lower.split())
+            chunk_words = set(chunk_lower.split())
+            common_words = question_words.intersection(chunk_words)
+            score += len(common_words)
+            
+            if score > 0:
+                scored_chunks.append((score, chunk))
+        
+        # Return top chunks by relevance score
+        scored_chunks.sort(reverse=True, key=lambda x: x[0])
+        return [chunk for score, chunk in scored_chunks[:5]]  # Top 5 chunks
+    
+    def _extract_keywords(self, question):
+        """Extract important keywords from the question"""
+        stop_words = {'what', 'how', 'why', 'when', 'where', 'who', 'which', 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'do', 'does', 'did'}
+        words = question.lower().split()
+        return [word for word in words if word not in stop_words and len(word) > 2]
+    
+    def _extract_document_sections(self):
+        """Extract logical sections from the document text"""
+        sections = []
+        
+        # Split by document boundaries
+        doc_parts = self.document_text.split('--- Document:')
+        
+        for doc_part in doc_parts[1:]:  # Skip first empty part
+            if '---\n\n' in doc_part:
+                doc_name, content = doc_part.split('---\n\n', 1)
+                doc_name = doc_name.strip()
+                
+                # Further split content by major sections
+                content_sections = self._split_into_sections(content)
+                for section_content in content_sections:
+                    if len(section_content.strip()) > 500:  # Only substantial sections
+                        sections.append({
+                            'document': doc_name,
+                            'content': section_content
+                        })
+        
+        return sections
+    
+    def _split_into_sections(self, content):
+        """Split content into logical sections"""
+        sections = []
+        
+        # Try to split by headings or major breaks
+        split_points = [
+            '\n# ', '\n## ', '\n### ', '\n#### ',
+            '\n• ', '\n- ', '\n* ', '\n1. ', '\n2. ', '\n3. ',
+            '\n\n\n', '\nSECTION', '\nCHAPTER'
+        ]
+        
+        current_section = content
+        for split_point in split_points:
+            if split_point in current_section:
+                parts = current_section.split(split_point)
+                sections.extend(parts)
+                break
+        else:
+            # If no clear splits, use paragraphs
+            paragraphs = [p for p in content.split('\n\n') if len(p.strip()) > 200]
+            sections.extend(paragraphs)
+        
+        return sections
+    
+    def _find_relevant_sections(self, question, sections):
+        """Find sections most relevant to the question"""
+        question_lower = question.lower()
+        keywords = self._extract_keywords(question)
+        
+        scored_sections = []
+        
+        for section in sections:
+            score = 0
+            content_lower = section['content'].lower()
+            
+            # Keyword matching
+            for keyword in keywords:
+                if keyword in content_lower:
+                    score += content_lower.count(keyword) * 3
+            
+            # Question word matching
+            question_words = set(question_lower.split())
+            content_words = set(content_lower.split())
+            common_words = question_words.intersection(content_words)
+            score += len(common_words)
+            
+            if score > 0:
+                scored_sections.append((score, section))
+        
+        scored_sections.sort(reverse=True, key=lambda x: x[0])
+        return [section for score, section in scored_sections[:8]]  # Top 8 sections
+    
+    def _build_focused_context(self, relevant_sections):
+        """Build focused context from relevant sections"""
+        context_parts = []
+        
+        for section in relevant_sections[:5]:  # Use top 5 most relevant sections
+            context_parts.append(f"--- From: {section['document']} ---\n{section['content']}")
+        
+        return "\n\n".join(context_parts)
     
     def _handle_large_document(self, question):
         """Handle documents that are too large by using smart chunking"""
@@ -608,7 +848,7 @@ class GeminiDocumentQA:
         status_text = st.empty()
         
         for i, chunk in enumerate(chunks):
-            status_text.text(f"Processing chunk {i+1}/{len(chunks)}...")
+            status_text.text(f"Searching section {i+1}/{len(chunks)}...")
             progress_bar.progress((i + 1) / len(chunks))
             
             chunk_prompt = f"""
@@ -1346,24 +1586,53 @@ def show_main_application():
             st.subheader("⚙️ Document Settings")
             
             with st.expander("Large Document Handling"):
-                st.info("Automatically split large files to avoid API limits")
+                st.info("""
+                **Performance Optimization:**
+                - Smaller chunk sizes improve answer quality but may take longer
+                - Very large documents are automatically processed with smart search
+                - The system prioritizes relevant sections for better answers
+                """)
                 
                 # Configurable size limits
                 max_size = st.slider(
                     "Max file size before splitting (characters)",
                     min_value=100000,
-                    max_value=1000000,
-                    value=500000,
+                    max_value=500000,
+                    value=300000,  # Reduced default
                     step=50000,
-                    help="Files larger than this will be automatically split into chunks"
+                    help="Smaller values improve answer quality but increase processing time"
+                )
+                
+                chunk_size = st.slider(
+                    "Processing chunk size",
+                    min_value=5000,
+                    max_value=30000,
+                    value=15000,
+                    step=1000,
+                    help="Smaller chunks = better precision, Larger chunks = faster processing"
                 )
                 
                 if st.button("Apply Settings", use_container_width=True):
                     st.session_state.qa_system.max_file_size = max_size
+                    st.session_state.qa_system.chunk_size = chunk_size
                     st.success("Settings updated!")
     
     # Main content area - only question input now
     st.markdown('<h2 class="glow-header">💬 Ask Questions</h2>', unsafe_allow_html=True)
+    
+    # Tips for better answers with large documents
+    with st.expander("💡 Tips for Better Answers with Large Documents"):
+        st.markdown("""
+        **For better results with large documents:**
+        
+        • **Be specific** - Ask precise questions rather than general ones
+        • **Enable only relevant files** - Disable documents that aren't related to your question
+        • **Use keywords** - Include specific terms from the documents in your questions
+        • **Break down complex questions** - Ask multiple focused questions instead of one broad question
+        • **Reference specific sections** - If you know where the information might be, mention it
+        
+        *The system automatically optimizes search for large documents to provide the most relevant answers.*
+        """)
     
     # Show active files info
     if st.session_state.qa_system.enabled_files:
