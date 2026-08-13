@@ -52,8 +52,12 @@
    ```bash
    pip install -r requirements.txt
    ```
+   or
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
 
-3. **Configure API Key**
+4. **Configure API Key**
    ```bash
    # Copy the example environment file
    cp .env.example .env
@@ -61,7 +65,7 @@
    # Edit .env and add your Gemini API key
    # GEMINI_API_KEY=your_actual_api_key_here
    ```
-
+Note: Be sure to change file type of .env to ENV type.
 ---
 
 ## 🚀 Usage
@@ -71,9 +75,17 @@ Install Streamlit:
 ```bash
 pip install streamlit
 ```
+or
+```bash
+python -m pip install streamlit
+```
 
 ```bash
 streamlit run webgeeta.py
+```
+or
+```bash
+python -m streamlit run webgeeta.py
 ```
 
 Then open your browser to `http://localhost:8501`
