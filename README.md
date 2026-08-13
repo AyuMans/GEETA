@@ -67,6 +67,10 @@
 ## 🚀 Usage
 
 ### Web Application (Recommended)
+Install Streamlit:
+```bash
+pip install streamlit
+```
 
 ```bash
 streamlit run webgeeta.py
