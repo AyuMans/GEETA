@@ -285,7 +285,7 @@ class GeminiDocumentQA:
             raise ValueError("Gemini API key is required. Set GEMINI_API_KEY environment variable.")
         
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('models/gemini-2.0-flash')
+        self.model = genai.GenerativeModel('models/gemini-3.5-flash')
         self.document_text = ""
         self.loaded_files = []  # All loaded files
         self.enabled_files = []  # Files currently enabled for Q&A
